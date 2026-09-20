@@ -7,6 +7,19 @@ options: { emailRedirectTo: window.location.origin + window.location.pathname },
 });
 if (error) throw error;
 }
+export async function signUpWithPassword(email, password) {
+  const { error } = await supabase.auth.signUp({
+    email,
+    password,
+    options: { emailRedirectTo: window.location.origin + window.location.pathname },
+  });
+  if (error) throw error;
+}
+
+export async function signInWithPassword(email, password) {
+  const { error } = await supabase.auth.signInWithPassword({ email, password });
+  if (error) throw error;
+}
 
 export async function signOut() {
 await supabase.auth.signOut();
