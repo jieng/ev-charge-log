@@ -27,13 +27,21 @@ await supabase.auth.signOut();
 
 export function onAuthChange(cb) {
 const { data } = supabase.auth.onAuthStateChange((_event, session) => cb(session));
-return () => data.subscription.unsubscribe();
+
+  return () => data.subscription.unsubscribe();
 }
 
 export async function getSession() {
 const { data } = await supabase.auth.getSession();
 return data.session;
 }
+
+export async function updateCharge(id, updates) {
+  const { data, error } = await supabase.from("charges").update(updates).eq("id", id).select().single();
+  if (error) throw error;
+  return data;
+}
+
 
 export async function getOrCreateVehicle(userId) {
 const { data, error } = await supabase
