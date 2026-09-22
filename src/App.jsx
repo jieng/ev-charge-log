@@ -1,11 +1,11 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import {
   Plus, X, Home, Zap, Calendar, List, Camera, Loader2,
-  Gauge, Briefcase, User, TrendingDown, TrendingUp, Trash2, Settings as SettingsIcon,
+  Gauge, Briefcase, User, TrendingDown, TrendingUp, Trash2, Settings as SettingsIcon, Pencil,
 } from "lucide-react";
 import {
   getSession, onAuthChange, getOrCreateVehicle,
-  listCharges, addCharge, deleteCharge, uploadReceipt, readReceiptOCR,
+  listCharges, addCharge, deleteCharge, updateCharge, uploadReceipt, readReceiptOCR,
 } from "./lib/api";
 import Login from "./components/Login";
 import SettingsSheet from "./components/Settings";
@@ -27,7 +27,7 @@ const monthKey = (iso) => iso.slice(0, 7);
 const THMONTH = ["มกราคม","กุมภาพันธ์","มีนาคม","เมษายน","พฤษภาคม","มิถุนายน","กรกฎาคม","สิงหาคม","กันยายน","ตุลาคม","พฤศจิกายน","ธันวาคม"];
 
 export default function App() {
-  const [session, setSession] = useState(undefined); // undefined = ยังไม่รู้, null = ไม่ได้ล็อกอิน
+  const [session, setSession] = useState(undefined);
   const [vehicle, setVehicle] = useState(null);
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -119,6 +119,13 @@ export default function App() {
     setDetail(null);
   };
 
+  const handleUpdate = async (id, payload) => {
+    const row = await updateCharge(id, toRow(payload, session.user.id, vehicle.id));
+    const updated = fromRow(row);
+    setEntries((p) => p.map((e) => (e.id === id ? updated : e)));
+    setDetail(updated);
+  };
+
   if (session === undefined || (session && loading && !vehicle)) {
     return (
       <div className="min-h-screen flex items-center justify-center" style={{ background: C.bg }}>
@@ -173,7 +180,16 @@ export default function App() {
       {sheet && vehicle && (
         <AddSheet onClose={() => setSheet(false)} onSave={handleAdd} avgRate={lifetime.avgRate} vehicle={vehicle} userId={session.user.id} />
       )}
-      {detail && <DetailSheet e={detail} avgRate={lifetime.avgRate} onClose={() => setDetail(null)} onDelete={handleDelete} />}
+      {detail && (
+        <DetailSheet
+          e={detail}
+          avgRate={lifetime.avgRate}
+          vehicle={vehicle}
+          onClose={() => setDetail(null)}
+          onDelete={handleDelete}
+          onSaveEdit={handleUpdate}
+        />
+      )}
       {settingsOpen && vehicle && (
         <SettingsSheet
           vehicle={vehicle}
@@ -589,11 +605,126 @@ function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
   );
 }
 
-/* ---------------- Detail ---------------- */
-function DetailSheet({ e, avgRate, onClose, onDelete }) {
+/* ---------------- Detail / Edit ---------------- */
+function DetailSheet({ e, avgRate, vehicle, onClose, onDelete, onSaveEdit }) {
+  const [editing, setEditing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const [f, setF] = useState({
+    place: e.place,
+    provider: e.provider,
+    station: e.station,
+    conn: e.conn || "DC",
+    kwh: String(e.kwh),
+    amount: String(e.amount),
+    odo: e.odo ? String(e.odo) : "",
+    category: e.category,
+    note: e.note || "",
+    receiptNo: e.receiptNo || "",
+  });
+  const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
+
   const rate = e.kwh ? e.amount / e.kwh : 0;
   const d = new Date(e.date);
-  const [busy, setBusy] = useState(false);
+
+  const saveEdit = async () => {
+    const kwh = parseFloat(f.kwh) || 0;
+    const amount = parseFloat(f.amount) || 0;
+    if (!kwh || !amount) { setErr("กรอกยอดเงินและหน่วยไฟก่อนบันทึก"); return; }
+    setBusy(true); setErr("");
+    try {
+      await onSaveEdit(e.id, {
+        place: f.place,
+        provider: f.provider,
+        station: f.station,
+        conn: f.conn,
+        kwh: +kwh.toFixed(2),
+        amount: +amount.toFixed(2),
+        date: e.date,
+        odo: parseInt(f.odo) || 0,
+        category: f.category,
+        note: f.note,
+        receiptNo: f.receiptNo,
+      });
+      setEditing(false);
+    } catch (err2) {
+      setErr("บันทึกไม่สำเร็จ ลองใหม่อีกครั้ง");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (editing) {
+    return (
+      <Sheet title="แก้ไขรายการ" onClose={() => setEditing(false)}>
+        {f.place === "station" && (
+          <>
+            <Field label="ผู้ให้บริการ">
+              <select value={f.provider} onChange={(ev) => set("provider", ev.target.value)} className={inputCls}>
+                {PROVIDERS.map((p) => <option key={p}>{p}</option>)}
+              </select>
+            </Field>
+            <Field label="ชื่อสถานี / สาขา">
+              <input value={f.station} onChange={(ev) => set("station", ev.target.value)} className={inputCls} />
+            </Field>
+            <Field label="ประเภทการชาร์จ">
+              <div className="grid grid-cols-2 gap-2">
+                {["DC", "AC"].map((v) => (
+                  <button key={v} onClick={() => set("conn", v)} className="py-3 rounded-2xl text-sm font-semibold"
+                    style={{ background: f.conn === v ? C.accent : "#fff", color: f.conn === v ? "#fff" : C.ink, border: `1px solid ${f.conn === v ? C.accent : C.line}` }}>
+                    {v}
+                  </button>
+                ))}
+              </div>
+            </Field>
+          </>
+        )}
+
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="ยอดเงิน (฿)"><input type="number" inputMode="decimal" value={f.amount} onChange={(ev) => set("amount", ev.target.value)} className={inputCls} /></Field>
+          <Field label="พลังงาน (kWh)"><input type="number" inputMode="decimal" value={f.kwh} onChange={(ev) => set("kwh", ev.target.value)} className={inputCls} /></Field>
+        </div>
+
+        <Field label="ใช้สำหรับ">
+          <div className="grid grid-cols-2 gap-2">
+            {[["personal", "ส่วนตัว", <User size={15} key="u" />], ["company", "บริษัท", <Briefcase size={15} key="b" />]].map(([v, l, ic]) => (
+              <button key={v} onClick={() => set("category", v)} className="py-3 rounded-2xl text-sm font-semibold flex items-center justify-center gap-1.5"
+                style={{ background: f.category === v ? C.accent : "#fff", color: f.category === v ? "#fff" : C.ink, border: `1px solid ${f.category === v ? C.accent : C.line}` }}>
+                {ic}{l}
+              </button>
+            ))}
+          </div>
+        </Field>
+
+        {f.category === "company" && (
+          <Field label="เลขที่ใบเสร็จ (สำหรับเบิก)">
+            <input value={f.receiptNo} onChange={(ev) => set("receiptNo", ev.target.value)} className={inputCls} />
+          </Field>
+        )}
+
+        <Field label={<span className="flex items-center gap-1"><Gauge size={14} /> เลขไมล์รถ</span>}>
+          <input type="number" inputMode="numeric" value={f.odo} onChange={(ev) => set("odo", ev.target.value)} className={inputCls} />
+        </Field>
+
+        <Field label="รายละเอียด (ไม่บังคับ)">
+          <textarea rows={2} value={f.note} onChange={(ev) => set("note", ev.target.value)} className={inputCls} />
+        </Field>
+
+        {err && <p className="text-sm mb-3" style={{ color: C.red }}>{err}</p>}
+
+        <div className="flex gap-2">
+          <button onClick={() => setEditing(false)} className="flex-1 py-3.5 rounded-2xl font-semibold" style={{ background: "#F0EEEB", color: C.ink }}>
+            ยกเลิก
+          </button>
+          <button onClick={saveEdit} disabled={busy} className="flex-1 py-3.5 rounded-2xl text-white font-bold flex items-center justify-center gap-2" style={{ background: C.accent }}>
+            {busy ? <Loader2 size={18} className="animate-spin" /> : "บันทึกการแก้ไข"}
+          </button>
+        </div>
+      </Sheet>
+    );
+  }
+
   return (
     <Sheet title={e.place === "home" ? "ชาร์จที่บ้าน" : e.provider} onClose={onClose}>
       <p className="text-5xl font-bold mb-1">{baht(e.amount)}</p>
@@ -616,14 +747,23 @@ function DetailSheet({ e, avgRate, onClose, onDelete }) {
         {e.odo > 0 && <Row k="เลขไมล์" v={`${e.odo.toLocaleString()} กม.`} />}
         {e.note && <Row k="หมายเหตุ" v={e.note} />}
       </div>
-      <button
-        onClick={async () => { setBusy(true); await onDelete(e.id); }}
-        disabled={busy}
-        className="w-full py-3.5 rounded-2xl font-semibold flex items-center justify-center gap-2"
-        style={{ background: "#F7ECE9", color: C.red }}
-      >
-        {busy ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />} ลบรายการนี้
-      </button>
+      <div className="flex gap-2">
+        <button
+          onClick={() => setEditing(true)}
+          className="flex-1 py-3.5 rounded-2xl font-semibold flex items-center justify-center gap-2"
+          style={{ background: C.accentSoft, color: C.accent }}
+        >
+          <Pencil size={16} /> แก้ไข
+        </button>
+        <button
+          onClick={async () => { setBusy(true); await onDelete(e.id); }}
+          disabled={busy}
+          className="flex-1 py-3.5 rounded-2xl font-semibold flex items-center justify-center gap-2"
+          style={{ background: "#F7ECE9", color: C.red }}
+        >
+          {busy ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />} ลบ
+        </button>
+      </div>
     </Sheet>
   );
 }
