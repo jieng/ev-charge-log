@@ -622,6 +622,8 @@ function DetailSheet({ e, avgRate, vehicle, onClose, onDelete, onSaveEdit }) {
     category: e.category,
     note: e.note || "",
     receiptNo: e.receiptNo || "",
+    date: e.date.slice(0, 10),
+    time: e.date.slice(11, 16),
   });
   const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
 
@@ -641,7 +643,7 @@ function DetailSheet({ e, avgRate, vehicle, onClose, onDelete, onSaveEdit }) {
         conn: f.conn,
         kwh: +kwh.toFixed(2),
         amount: +amount.toFixed(2),
-        date: e.date,
+        date: `${f.date}T${f.time}:00`,
         odo: parseInt(f.odo) || 0,
         category: f.category,
         note: f.note,
@@ -680,6 +682,11 @@ function DetailSheet({ e, avgRate, vehicle, onClose, onDelete, onSaveEdit }) {
             </Field>
           </>
         )}
+
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="วันที่"><input type="date" value={f.date} onChange={(ev) => set("date", ev.target.value)} className={inputCls} /></Field>
+          <Field label="เวลา"><input type="time" value={f.time} onChange={(ev) => set("time", ev.target.value)} className={inputCls} /></Field>
+        </div>
 
         <div className="grid grid-cols-2 gap-3">
           <Field label="ยอดเงิน (฿)"><input type="number" inputMode="decimal" value={f.amount} onChange={(ev) => set("amount", ev.target.value)} className={inputCls} /></Field>
