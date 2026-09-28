@@ -1,12 +1,15 @@
 import { supabase } from "./supabaseClient";
 
+/* ---------- Auth ---------- */
+
 export async function sendMagicLink(email) {
-const { error } = await supabase.auth.signInWithOtp({
-email,
-options: { emailRedirectTo: window.location.origin + window.location.pathname },
-});
-if (error) throw error;
+  const { error } = await supabase.auth.signInWithOtp({
+    email,
+    options: { emailRedirectTo: window.location.origin + window.location.pathname },
+  });
+  if (error) throw error;
 }
+
 export async function signUpWithPassword(email, password) {
   const { error } = await supabase.auth.signUp({
     email,
@@ -22,18 +25,63 @@ export async function signInWithPassword(email, password) {
 }
 
 export async function signOut() {
-await supabase.auth.signOut();
+  await supabase.auth.signOut();
 }
 
 export function onAuthChange(cb) {
-const { data } = supabase.auth.onAuthStateChange((_event, session) => cb(session));
-
+  const { data } = supabase.auth.onAuthStateChange((_event, session) => cb(session));
   return () => data.subscription.unsubscribe();
 }
 
 export async function getSession() {
-const { data } = await supabase.auth.getSession();
-return data.session;
+  const { data } = await supabase.auth.getSession();
+  return data.session;
+}
+
+/* ---------- Vehicle ---------- */
+
+export async function getOrCreateVehicle(userId) {
+  const { data, error } = await supabase
+    .from("vehicles")
+    .select("*")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  if (data) return data;
+
+  const { data: created, error: insErr } = await supabase
+    .from("vehicles")
+    .insert({ user_id: userId, name: "รถของฉัน", battery_kwh: 60, home_rate: 4.42 })
+    .select()
+    .single();
+  if (insErr) throw insErr;
+  return created;
+}
+
+export async function updateVehicle(id, patch) {
+  const { data, error } = await supabase.from("vehicles").update(patch).eq("id", id).select().single();
+  if (error) throw error;
+  return data;
+}
+
+/* ---------- Charges ---------- */
+
+export async function listCharges(userId) {
+  const { data, error } = await supabase
+    .from("charges")
+    .select("*")
+    .eq("user_id", userId)
+    .order("charged_at", { ascending: false });
+  if (error) throw error;
+  return data;
+}
+
+export async function addCharge(row) {
+  const { data, error } = await supabase.from("charges").insert(row).select().single();
+  if (error) throw error;
+  return data;
 }
 
 export async function updateCharge(id, updates) {
@@ -42,81 +90,96 @@ export async function updateCharge(id, updates) {
   return data;
 }
 
-
-export async function getOrCreateVehicle(userId) {
-const { data, error } = await supabase
-.from("vehicles")
-.select("*")
-.eq("user_id", userId)
-.order("created_at", { ascending: true })
-.limit(1)
-.maybeSingle();
-if (error) throw error;
-if (data) return data;
-
-const { data: created, error: insErr } = await supabase
-.from("vehicles")
-.insert({ user_id: userId, name: "รถของฉัน", battery_kwh: 60, home_rate: 4.42 })
-.select()
-.single();
-if (insErr) throw insErr;
-return created;
-}
-
-export async function updateVehicle(id, patch) {
-const { data, error } = await supabase
-.from("vehicles")
-.update(patch)
-.eq("id", id)
-.select()
-.single();
-if (error) throw error;
-return data;
-}
-
-export async function listCharges(userId) {
-const { data, error } = await supabase
-.from("charges")
-.select("*")
-.eq("user_id", userId)
-.order("charged_at", { ascending: false });
-if (error) throw error;
-return data;
-}
-
-export async function addCharge(row) {
-const { data, error } = await supabase.from("charges").insert(row).select().single();
-if (error) throw error;
-return data;
-}
-
 export async function deleteCharge(id) {
-const { error } = await supabase.from("charges").delete().eq("id", id);
-if (error) throw error;
+  const { error } = await supabase.from("charges").delete().eq("id", id);
+  if (error) throw error;
 }
+
+/* ---------- งาน (Job) ---------- */
+
+export async function listJobs(userId) {
+  const { data, error } = await supabase
+    .from("jobs")
+    .select("*")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+  return data;
+}
+
+export async function upsertJob(row) {
+  const { data, error } = await supabase
+    .from("jobs")
+    .upsert(row, { onConflict: "user_id,code" })
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+// สร้างแถวงานว่างๆ ถ้ายังไม่มี (ไม่ทับข้อมูลเดิม)
+export async function ensureJob(userId, code) {
+  const { error } = await supabase
+    .from("jobs")
+    .upsert({ user_id: userId, code }, { onConflict: "user_id,code", ignoreDuplicates: true });
+  if (error) throw error;
+}
+
+export async function deleteJob(userId, code) {
+  const { error } = await supabase.from("jobs").delete().eq("user_id", userId).eq("code", code);
+  if (error) throw error;
+}
+
+/* ---------- ผูกบัญชี LINE ---------- */
+
+export async function createLinkCode(userId) {
+  for (let i = 0; i < 6; i++) {
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const { error } = await supabase.from("link_codes").insert({ code, user_id: userId });
+    if (!error) return code;
+    if (error.code !== "23505") throw error; // ซ้ำ = สุ่มใหม่
+  }
+  throw new Error("สร้างรหัสไม่สำเร็จ ลองใหม่อีกครั้ง");
+}
+
+export async function getLineLinks(userId) {
+  const { data, error } = await supabase
+    .from("line_links")
+    .select("line_user_id, created_at")
+    .eq("user_id", userId);
+  if (error) throw error;
+  return data;
+}
+
+export async function unlinkLine(lineUserId) {
+  const { error } = await supabase.from("line_links").delete().eq("line_user_id", lineUserId);
+  if (error) throw error;
+}
+
+/* ---------- ใบเสร็จ ---------- */
 
 export async function uploadReceipt(userId, file) {
-const path = `${userId}/${Date.now()}-${file.name}`;
-const { error } = await supabase.storage.from("receipts").upload(path, file);
-if (error) {
-console.warn("อัปโหลดรูปใบเสร็จไม่สำเร็จ:", error.message);
-return null;
-}
-return path;
+  const path = `${userId}/${Date.now()}-${file.name}`;
+  const { error } = await supabase.storage.from("receipts").upload(path, file);
+  if (error) {
+    console.warn("อัปโหลดรูปใบเสร็จไม่สำเร็จ:", error.message);
+    return null;
+  }
+  return path;
 }
 
 export async function readReceiptOCR(file) {
-const base64 = await new Promise((resolve, reject) => {
-const r = new FileReader();
-r.onload = () => resolve(r.result.split(",")[1]);
-r.onerror = () => reject(new Error("อ่านไฟล์รูปไม่สำเร็จ"));
-r.readAsDataURL(file);
-});
+  const base64 = await new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result.split(",")[1]);
+    r.onerror = () => reject(new Error("อ่านไฟล์รูปไม่สำเร็จ"));
+    r.readAsDataURL(file);
+  });
 
-const { data, error } = await supabase.functions.invoke("read-receipt", {
-body: { image: base64, mediaType: file.type || "image/jpeg" },
-});
-if (error) throw error;
-if (data?.error) throw new Error(data.error);
-return data;
+  const { data, error } = await supabase.functions.invoke("read-receipt", {
+    body: { image: base64, mediaType: file.type || "image/jpeg" },
+  });
+  if (error) throw error;
+  if (data?.error) throw new Error(data.error);
+  return data;
 }
