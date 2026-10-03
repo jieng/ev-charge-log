@@ -28,7 +28,6 @@ const TH_SHORT = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค
 const baht = (n) => "฿" + (n ?? 0).toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const num = (n, d = 2) => (n ?? 0).toLocaleString("th-TH", { minimumFractionDigits: d, maximumFractionDigits: d });
 
-/* ---------- เวลา: ระบบเก็บ "เวลาไทยตามนาฬิกา" ในรูป UTC (20:18 น. = 20:18Z) จึงอ่านจากข้อความตรงๆ ไม่แปลงโซนเวลา ---------- */
 const thaiWallNow = () => new Date(Date.now() + 7 * 3600 * 1000);
 const wallMs = (iso) => Date.parse(iso.slice(0, 19) + "Z");
 const fmtTime = (iso) => iso.slice(11, 16);
@@ -41,7 +40,6 @@ const fmtLong = (iso) => {
   return `${d} ${THMONTH[m - 1]} ${y + 543}`;
 };
 
-// รอบสรุป: startDay = วันเริ่มรอบ (1 = เดือนปกติ), offset 0 = รอบปัจจุบัน, -1 = รอบก่อน
 function periodRange(startDay, offset = 0) {
   const ref = thaiWallNow();
   let m = ref.getUTCMonth() + offset;
@@ -83,40 +81,19 @@ function exportCsv(rows, label) {
   setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
 
-/* ---------- DB row <-> โมเดลหน้าจอ ---------- */
 function fromRow(r) {
   return {
-    id: r.id,
-    place: r.place,
-    provider: r.provider,
-    station: r.station_name,
-    conn: r.conn_type,
-    kwh: Number(r.energy_kwh),
-    amount: Number(r.amount),
-    date: r.charged_at,
-    odo: r.odometer || 0,
-    category: r.category,
-    note: r.note || "",
-    receiptNo: r.receipt_no || "",
-    job: r.project_code || "",
+    id: r.id, place: r.place, provider: r.provider, station: r.station_name, conn: r.conn_type,
+    kwh: Number(r.energy_kwh), amount: Number(r.amount), date: r.charged_at, odo: r.odometer || 0,
+    category: r.category, note: r.note || "", receiptNo: r.receipt_no || "", job: r.project_code || "",
     reimbursed: !!r.reimbursed,
   };
 }
 function toRow(e, userId, vehicleId) {
   return {
-    user_id: userId,
-    vehicle_id: vehicleId,
-    place: e.place,
-    provider: e.provider,
-    station_name: e.station,
-    conn_type: e.conn,
-    energy_kwh: e.kwh,
-    amount: e.amount,
-    charged_at: e.date,
-    odometer: e.odo || null,
-    category: e.category,
-    note: e.note || null,
-    receipt_no: e.receiptNo || null,
+    user_id: userId, vehicle_id: vehicleId, place: e.place, provider: e.provider, station_name: e.station,
+    conn_type: e.conn, energy_kwh: e.kwh, amount: e.amount, charged_at: e.date, odometer: e.odo || null,
+    category: e.category, note: e.note || null, receipt_no: e.receiptNo || null,
     project_code: e.job ? e.job.trim().toUpperCase() : null,
     reimbursed: e.category === "company" ? !!e.reimbursed : false,
     reimbursed_at: e.category === "company" && e.reimbursed ? thaiWallNow().toISOString().slice(0, 10) : null,
@@ -135,7 +112,7 @@ export default function App() {
   const [periodOffset, setPeriodOffset] = useState(0);
   const [showAll, setShowAll] = useState(false);
   const [detail, setDetail] = useState(null);
-  const [jobSheet, setJobSheet] = useState(null); // null | "new" | code
+  const [jobSheet, setJobSheet] = useState(null);
   const [loadErr, setLoadErr] = useState("");
 
   useEffect(() => {
@@ -183,13 +160,9 @@ export default function App() {
   const summarize = (rows) => {
     const sum = (f) => rows.filter(f).reduce((s, e) => s + e.amount, 0);
     return {
-      rows,
-      total: sum(() => true),
-      kwh: rows.reduce((s, e) => s + e.kwh, 0),
-      home: sum((e) => e.place === "home"),
-      station: sum((e) => e.place === "station"),
-      personal: sum((e) => e.category === "personal"),
-      company: sum((e) => e.category === "company"),
+      rows, total: sum(() => true), kwh: rows.reduce((s, e) => s + e.kwh, 0),
+      home: sum((e) => e.place === "home"), station: sum((e) => e.place === "station"),
+      personal: sum((e) => e.category === "personal"), company: sum((e) => e.category === "company"),
       companyPending: sum((e) => e.category === "company" && !e.reimbursed),
       companyPaid: sum((e) => e.category === "company" && e.reimbursed),
     };
@@ -244,7 +217,13 @@ export default function App() {
     try {
       await ensureJob(session.user.id, c);
       setJobs((p) => [{ user_id: session.user.id, code: c, title: null, round_trip_km: null }, ...p]);
-    } catch (e) { /* ไม่กระทบการบันทึกรายการ */ }
+    } catch (e) { }
+  };
+
+  const [toast, setToast] = useState("");
+  const showToast = (msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(""), 2500);
   };
 
   const handleAdd = async (payload) => {
@@ -252,6 +231,7 @@ export default function App() {
     setEntries((p) => [fromRow(row), ...p]);
     touchJob(payload.job);
     setSheet(false);
+    showToast(`✅ บันทึกแล้ว ${baht(row.amount)}`);
   };
 
   const handleDelete = async (id) => {
@@ -363,6 +343,13 @@ export default function App() {
       </div>
 
       <NavBar tab={tab} setTab={setTab} />
+      {toast && (
+        <div className="fixed left-0 right-0 flex justify-center z-[60]" style={{ bottom: 100 }}>
+          <div className="px-5 py-3 rounded-2xl text-white text-sm font-semibold shadow-lg" style={{ background: C.ink }}>
+            {toast}
+          </div>
+        </div>
+      )}
 
       {sheet && vehicle && (
         <AddSheet onClose={() => setSheet(false)} onSave={handleAdd} avgRate={lifetime.avgRate} vehicle={vehicle} userId={session.user.id} />
@@ -401,7 +388,6 @@ export default function App() {
   );
 }
 
-/* ---------------- Summary ---------------- */
 function SummaryCard({ monthly, yearly, period, shiftPeriod, canNext }) {
   return (
     <div className="rounded-3xl bg-white p-6 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
@@ -443,7 +429,6 @@ function Pill({ icon, label, value, highlight }) {
   );
 }
 
-/* ---------------- Entry card ---------------- */
 function EntryCard({ e, avgRate, onClick }) {
   const rate = e.kwh ? e.amount / e.kwh : 0;
   const diff = avgRate ? ((rate - avgRate) / avgRate) * 100 : 0;
@@ -500,7 +485,6 @@ function EmptyState({ onAdd }) {
   );
 }
 
-/* ---------------- Stats tab ---------------- */
 function StatsTab({ chart, lifetime, entries, vehicle, monthly, period, onToggleReimburse, onExport, onOpen }) {
   return (
     <div className="space-y-4">
@@ -660,7 +644,6 @@ function Stat({ label, value, unit, big }) {
   );
 }
 
-/* ---------------- Jobs ---------------- */
 function JobsTab({ stats, onOpen, onNew }) {
   return (
     <div>
@@ -783,7 +766,6 @@ function JobSheet({ isNew, stat, entries, onClose, onSave, onDelete }) {
   );
 }
 
-/* ---------------- Add sheet ---------------- */
 function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
   const w = thaiWallNow().toISOString();
   const [f, setF] = useState({
@@ -798,6 +780,7 @@ function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
   const [err, setErr] = useState("");
   const [pendingFile, setPendingFile] = useState(null);
   const fileRef = useRef(null);
+  const savedRef = useRef(false);
   const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
 
   const homeKwh = ((f.socTo - f.socFrom) / 100) * vehicle.battery_kwh;
@@ -832,7 +815,9 @@ function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
   };
 
   const save = async () => {
+    if (savedRef.current) return;
     if (!amount || !kwh) { setErr("กรอกยอดเงินและหน่วยไฟก่อนบันทึก"); return; }
+    savedRef.current = true;
     setSaving(true); setErr("");
     try {
       await onSave({
@@ -852,6 +837,7 @@ function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
       });
       if (pendingFile) uploadReceipt(userId, pendingFile);
     } catch (e) {
+      savedRef.current = false;
       setErr("บันทึกไม่สำเร็จ ลองใหม่อีกครั้ง");
     } finally {
       setSaving(false);
@@ -963,14 +949,13 @@ function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
 
       {err && <p className="text-sm mb-3" style={{ color: C.red }}>{err}</p>}
 
-      <button onClick={save} disabled={saving} className="w-full py-4 rounded-2xl text-white font-bold text-lg flex items-center justify-center gap-2" style={{ background: C.accent }}>
+      <button onClick={save} disabled={saving || savedRef.current} className="w-full py-4 rounded-2xl text-white font-bold text-lg flex items-center justify-center gap-2" style={{ background: C.accent }}>
         {saving ? <Loader2 size={18} className="animate-spin" /> : "บันทึก"}
       </button>
     </Sheet>
   );
 }
 
-/* ---------------- Detail / Edit ---------------- */
 function DetailSheet({ e, avgRate, onClose, onDelete, onSaveEdit, onToggleReimburse }) {
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1123,7 +1108,6 @@ function Row({ k, v }) {
   );
 }
 
-/* ---------------- shared ---------------- */
 const inputCls = "w-full px-4 py-3.5 rounded-2xl bg-white outline-none text-base";
 
 function Field({ label, children }) {
