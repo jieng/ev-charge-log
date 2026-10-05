@@ -28,6 +28,7 @@ const TH_SHORT = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค
 const baht = (n) => "฿" + (n ?? 0).toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const num = (n, d = 2) => (n ?? 0).toLocaleString("th-TH", { minimumFractionDigits: d, maximumFractionDigits: d });
 
+/* ---------- เวลา: ระบบเก็บ "เวลาไทยตามนาฬิกา" ในรูป UTC (20:18 น. = 20:18Z) จึงอ่านจากข้อความตรงๆ ไม่แปลงโซนเวลา ---------- */
 const thaiWallNow = () => new Date(Date.now() + 7 * 3600 * 1000);
 const wallMs = (iso) => Date.parse(iso.slice(0, 19) + "Z");
 const fmtTime = (iso) => iso.slice(11, 16);
@@ -40,6 +41,7 @@ const fmtLong = (iso) => {
   return `${d} ${THMONTH[m - 1]} ${y + 543}`;
 };
 
+// รอบสรุป: startDay = วันเริ่มรอบ (1 = เดือนปกติ), offset 0 = รอบปัจจุบัน, -1 = รอบก่อน
 function periodRange(startDay, offset = 0) {
   const ref = thaiWallNow();
   let m = ref.getUTCMonth() + offset;
@@ -81,19 +83,40 @@ function exportCsv(rows, label) {
   setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
 
+/* ---------- DB row <-> โมเดลหน้าจอ ---------- */
 function fromRow(r) {
   return {
-    id: r.id, place: r.place, provider: r.provider, station: r.station_name, conn: r.conn_type,
-    kwh: Number(r.energy_kwh), amount: Number(r.amount), date: r.charged_at, odo: r.odometer || 0,
-    category: r.category, note: r.note || "", receiptNo: r.receipt_no || "", job: r.project_code || "",
+    id: r.id,
+    place: r.place,
+    provider: r.provider,
+    station: r.station_name,
+    conn: r.conn_type,
+    kwh: Number(r.energy_kwh),
+    amount: Number(r.amount),
+    date: r.charged_at,
+    odo: r.odometer || 0,
+    category: r.category,
+    note: r.note || "",
+    receiptNo: r.receipt_no || "",
+    job: r.project_code || "",
     reimbursed: !!r.reimbursed,
   };
 }
 function toRow(e, userId, vehicleId) {
   return {
-    user_id: userId, vehicle_id: vehicleId, place: e.place, provider: e.provider, station_name: e.station,
-    conn_type: e.conn, energy_kwh: e.kwh, amount: e.amount, charged_at: e.date, odometer: e.odo || null,
-    category: e.category, note: e.note || null, receipt_no: e.receiptNo || null,
+    user_id: userId,
+    vehicle_id: vehicleId,
+    place: e.place,
+    provider: e.provider,
+    station_name: e.station,
+    conn_type: e.conn,
+    energy_kwh: e.kwh,
+    amount: e.amount,
+    charged_at: e.date,
+    odometer: e.odo || null,
+    category: e.category,
+    note: e.note || null,
+    receipt_no: e.receiptNo || null,
     project_code: e.job ? e.job.trim().toUpperCase() : null,
     reimbursed: e.category === "company" ? !!e.reimbursed : false,
     reimbursed_at: e.category === "company" && e.reimbursed ? thaiWallNow().toISOString().slice(0, 10) : null,
@@ -112,7 +135,7 @@ export default function App() {
   const [periodOffset, setPeriodOffset] = useState(0);
   const [showAll, setShowAll] = useState(false);
   const [detail, setDetail] = useState(null);
-  const [jobSheet, setJobSheet] = useState(null);
+  const [jobSheet, setJobSheet] = useState(null); // null | "new" | code
   const [loadErr, setLoadErr] = useState("");
 
   useEffect(() => {
@@ -160,9 +183,13 @@ export default function App() {
   const summarize = (rows) => {
     const sum = (f) => rows.filter(f).reduce((s, e) => s + e.amount, 0);
     return {
-      rows, total: sum(() => true), kwh: rows.reduce((s, e) => s + e.kwh, 0),
-      home: sum((e) => e.place === "home"), station: sum((e) => e.place === "station"),
-      personal: sum((e) => e.category === "personal"), company: sum((e) => e.category === "company"),
+      rows,
+      total: sum(() => true),
+      kwh: rows.reduce((s, e) => s + e.kwh, 0),
+      home: sum((e) => e.place === "home"),
+      station: sum((e) => e.place === "station"),
+      personal: sum((e) => e.category === "personal"),
+      company: sum((e) => e.category === "company"),
       companyPending: sum((e) => e.category === "company" && !e.reimbursed),
       companyPaid: sum((e) => e.category === "company" && e.reimbursed),
     };
@@ -217,7 +244,7 @@ export default function App() {
     try {
       await ensureJob(session.user.id, c);
       setJobs((p) => [{ user_id: session.user.id, code: c, title: null, round_trip_km: null }, ...p]);
-    } catch (e) { }
+    } catch (e) { /* ไม่กระทบการบันทึกรายการ */ }
   };
 
   const [toast, setToast] = useState("");
@@ -388,6 +415,7 @@ export default function App() {
   );
 }
 
+/* ---------------- Summary ---------------- */
 function SummaryCard({ monthly, yearly, period, shiftPeriod, canNext }) {
   return (
     <div className="rounded-3xl bg-white p-6 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
@@ -429,6 +457,7 @@ function Pill({ icon, label, value, highlight }) {
   );
 }
 
+/* ---------------- Entry card ---------------- */
 function EntryCard({ e, avgRate, onClick }) {
   const rate = e.kwh ? e.amount / e.kwh : 0;
   const diff = avgRate ? ((rate - avgRate) / avgRate) * 100 : 0;
@@ -485,6 +514,7 @@ function EmptyState({ onAdd }) {
   );
 }
 
+/* ---------------- Stats tab ---------------- */
 function StatsTab({ chart, lifetime, entries, vehicle, monthly, period, onToggleReimburse, onExport, onOpen }) {
   return (
     <div className="space-y-4">
@@ -506,6 +536,8 @@ function StatsTab({ chart, lifetime, entries, vehicle, monthly, period, onToggle
       </div>
 
       <PriceCompare entries={entries} homeRate={Number(vehicle?.home_rate) || 0} />
+
+      <PersonalCard monthly={monthly} period={period} onOpen={onOpen} />
 
       <CompanyCard monthly={monthly} period={period} onToggle={onToggleReimburse} onExport={onExport} onOpen={onOpen} />
     </div>
@@ -592,6 +624,43 @@ function PriceCompare({ entries, homeRate }) {
   );
 }
 
+function PersonalCard({ monthly, period, onOpen }) {
+  const rows = monthly.rows.filter((e) => e.category === "personal");
+  const total = rows.reduce((s, e) => s + e.amount, 0);
+  const kwh = rows.reduce((s, e) => s + e.kwh, 0);
+  const home = rows.filter((e) => e.place === "home").reduce((s, e) => s + e.amount, 0);
+  const station = rows.filter((e) => e.place === "station").reduce((s, e) => s + e.amount, 0);
+  const avg = kwh ? total / kwh : 0;
+  return (
+    <div className="rounded-3xl bg-white p-6 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
+      <div className="mb-3">
+        <h2 className="font-semibold">สรุปส่วนตัว</h2>
+        <p className="text-xs mt-0.5" style={{ color: C.muted }}>{period.label}</p>
+      </div>
+      <div className="text-center mb-4">
+        <p className="text-4xl font-bold tracking-tight">{baht(total)}</p>
+        <p className="text-xs mt-1" style={{ color: C.muted }}>{rows.length} ครั้ง · {num(kwh, 1)} kWh{avg > 0 ? ` · เฉลี่ย ${num(avg)} ฿/kWh` : ""}</p>
+      </div>
+      <div className="grid grid-cols-2 gap-2 mb-4">
+        <Pill icon={<Home size={14} />} label="ชาร์จที่บ้าน" value={baht(home)} />
+        <Pill icon={<Zap size={14} />} label="ชาร์จที่สถานี" value={baht(station)} />
+      </div>
+      {rows.length === 0 && <p className="text-sm" style={{ color: C.muted }}>รอบนี้ยังไม่มีรายการส่วนตัว</p>}
+      <div className="space-y-2">
+        {rows.map((e) => (
+          <button key={e.id} onClick={() => onOpen(e)} className="w-full flex items-center gap-3 py-2 text-left" style={{ borderBottom: `1px solid ${C.line}` }}>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium truncate">{e.place === "home" ? "ชาร์จที่บ้าน" : (e.station || e.provider)}</p>
+              <p className="text-xs" style={{ color: C.muted }}>{fmtShort(e.date)} · {num(e.kwh, 1)} kWh{e.job ? ` · งาน ${e.job}` : ""}</p>
+            </div>
+            <span className="text-sm font-semibold shrink-0">{baht(e.amount)}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function CompanyCard({ monthly, period, onToggle, onExport, onOpen }) {
   const rows = monthly.rows.filter((e) => e.category === "company");
   return (
@@ -644,6 +713,7 @@ function Stat({ label, value, unit, big }) {
   );
 }
 
+/* ---------------- Jobs ---------------- */
 function JobsTab({ stats, onOpen, onNew }) {
   return (
     <div>
@@ -766,6 +836,7 @@ function JobSheet({ isNew, stat, entries, onClose, onSave, onDelete }) {
   );
 }
 
+/* ---------------- Add sheet ---------------- */
 function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
   const w = thaiWallNow().toISOString();
   const [f, setF] = useState({
@@ -778,6 +849,7 @@ function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
   const [busy, setBusy] = useState(false);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
+  const [dateWarn, setDateWarn] = useState(false);
   const [pendingFile, setPendingFile] = useState(null);
   const fileRef = useRef(null);
   const savedRef = useRef(false);
@@ -792,9 +864,10 @@ function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
   const pickFile = (file) => { setPendingFile(file); readReceipt(file); };
 
   const readReceipt = async (file) => {
-    setBusy(true); setErr("");
+    setBusy(true); setErr(""); setDateWarn(false);
     try {
       const j = await readReceiptOCR(file);
+      if (!j.date) setDateWarn(true);
       setF((p) => ({
         ...p,
         place: "station",
@@ -815,7 +888,7 @@ function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
   };
 
   const save = async () => {
-    if (savedRef.current) return;
+    if (savedRef.current) return; // กันกดซ้ำ/แตะซ้ำก่อนปุ่มจะ disable ทัน
     if (!amount || !kwh) { setErr("กรอกยอดเงินและหน่วยไฟก่อนบันทึก"); return; }
     savedRef.current = true;
     setSaving(true); setErr("");
@@ -906,9 +979,12 @@ function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
       )}
 
       <div className="grid grid-cols-2 gap-3">
-        <Field label="วันที่"><input type="date" value={f.date} onChange={(e) => set("date", e.target.value)} className={inputCls} /></Field>
-        <Field label="เวลา"><input type="time" value={f.time} onChange={(e) => set("time", e.target.value)} className={inputCls} /></Field>
+        <Field label="วันที่"><input type="date" value={f.date} onChange={(e) => { set("date", e.target.value); setDateWarn(false); }} className={inputCls} /></Field>
+        <Field label="เวลา"><input type="time" value={f.time} onChange={(e) => { set("time", e.target.value); setDateWarn(false); }} className={inputCls} /></Field>
       </div>
+      {dateWarn && (
+        <p className="text-xs mb-4 -mt-2 px-1" style={{ color: C.red }}>⚠️ AI อ่านวันที่ในใบเสร็จไม่ชัด ใช้วันนี้แทนไว้ก่อน กรุณาตรวจสอบและแก้ไขให้ตรงกับใบเสร็จจริง</p>
+      )}
 
       <Field label="เลขงาน (Job)">
         <input list="jobs-list" value={f.job} onChange={(e) => set("job", e.target.value)} placeholder="เช่น 1234 (ไม่บังคับ)" className={inputCls} />
@@ -956,6 +1032,7 @@ function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
   );
 }
 
+/* ---------------- Detail / Edit ---------------- */
 function DetailSheet({ e, avgRate, onClose, onDelete, onSaveEdit, onToggleReimburse }) {
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1108,6 +1185,7 @@ function Row({ k, v }) {
   );
 }
 
+/* ---------------- shared ---------------- */
 const inputCls = "w-full px-4 py-3.5 rounded-2xl bg-white outline-none text-base";
 
 function Field({ label, children }) {
