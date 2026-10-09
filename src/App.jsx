@@ -1,8 +1,9 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from "react";
+import { createPortal } from "react-dom";
 import {
   Plus, X, Home, Zap, Calendar, List, Camera, Loader2, Briefcase, User,
   Gauge, TrendingDown, TrendingUp, Trash2, Settings as SettingsIcon, Pencil,
-  Download, CheckCircle2, Circle, ChevronRight,
+  Download, CheckCircle2, Circle, ChevronRight, Printer, CheckSquare, Square,
 } from "lucide-react";
 import {
   getSession, onAuthChange, getOrCreateVehicle, listCharges, addCharge, deleteCharge,
@@ -61,6 +62,52 @@ const inRange = (e, r) => {
   const t = wallMs(e.date);
   return t >= r.start && t < r.end;
 };
+
+/* ---------- ช่วงเวลา: สัปดาห์ (จันทร์–อาทิตย์) / ปี / สรุปยอด ---------- */
+const DAY = 86400000;
+const fmtMsDate = (ms, withYear = false) => {
+  const d = new Date(ms);
+  return `${d.getUTCDate()} ${TH_SHORT[d.getUTCMonth()]}${withYear ? " " + (d.getUTCFullYear() + 543) : ""}`;
+};
+const dayFloor = (ms) => Math.floor(ms / DAY) * DAY;
+const weekStartOf = (ms) => {
+  const d = dayFloor(ms);
+  return d - ((new Date(d).getUTCDay() + 6) % 7) * DAY;
+};
+function weekRange(offset = 0) {
+  const start = weekStartOf(thaiWallNow().getTime()) + offset * 7 * DAY;
+  const end = start + 7 * DAY;
+  return { start, end, label: `${fmtMsDate(start)} – ${fmtMsDate(end - DAY, true)}`, short: fmtMsDate(start) };
+}
+function yearRange(y) {
+  return { start: Date.UTC(y, 0, 1), end: Date.UTC(y + 1, 0, 1), label: `ปี ${y + 543}`, short: String(y + 543) };
+}
+function sumRows(rows) {
+  const amount = rows.reduce((s, e) => s + e.amount, 0);
+  const kwh = rows.reduce((s, e) => s + e.kwh, 0);
+  return {
+    count: rows.length, amount, kwh, avg: kwh ? amount / kwh : 0,
+    home: rows.filter((e) => e.place === "home").reduce((s, e) => s + e.amount, 0),
+    station: rows.filter((e) => e.place === "station").reduce((s, e) => s + e.amount, 0),
+    personal: rows.filter((e) => e.category === "personal").reduce((s, e) => s + e.amount, 0),
+    company: rows.filter((e) => e.category === "company").reduce((s, e) => s + e.amount, 0),
+    pending: rows.filter((e) => e.category === "company" && !e.reimbursed).reduce((s, e) => s + e.amount, 0),
+    paid: rows.filter((e) => e.category === "company" && e.reimbursed).reduce((s, e) => s + e.amount, 0),
+  };
+}
+// จัดกลุ่มรายการตามช่วง (key ต่อรายการ) คืนเป็นอาร์เรย์เรียงตาม key
+function groupRows(rows, keyOf, labelOf) {
+  const m = new Map();
+  rows.forEach((e) => {
+    const k = keyOf(e);
+    if (!m.has(k)) m.set(k, []);
+    m.get(k).push(e);
+  });
+  return [...m.entries()].sort((a, b) => a[0] - b[0]).map(([k, rs]) => ({ key: k, label: labelOf(k), ...sumRows(rs) }));
+}
+const weekLabelOf = (k) => `${fmtMsDate(k)} – ${fmtMsDate(k + 6 * DAY)}`;
+const monthKeyOf = (e) => Date.UTC(Number(e.date.slice(0, 4)), Number(e.date.slice(5, 7)) - 1, 1);
+const monthLabelOf = (k) => { const d = new Date(k); return `${THMONTH[d.getUTCMonth()]} ${d.getUTCFullYear() + 543}`; };
 
 function exportCsv(rows, label) {
   const head = ["วันที่", "เวลา", "ผู้ให้บริการ", "สถานี", "kWh", "ยอดเงิน (บาท)", "เลขที่ใบเสร็จ", "เลขงาน", "สถานะเบิก"];
@@ -137,6 +184,7 @@ export default function App() {
   const [detail, setDetail] = useState(null);
   const [jobSheet, setJobSheet] = useState(null); // null | "new" | code
   const [loadErr, setLoadErr] = useState("");
+  const [reportOpen, setReportOpen] = useState(false);
 
   useEffect(() => {
     getSession().then(setSession);
@@ -357,7 +405,8 @@ export default function App() {
         {tab === "stats" && (
           <StatsTab
             chart={chart} lifetime={lifetime} entries={entries} vehicle={vehicle}
-            monthly={monthly} period={period}
+            monthly={monthly} period={period} startDay={startDay}
+            onReport={() => setReportOpen(true)}
             onToggleReimburse={handleToggleReimburse}
             onExport={() => exportCsv(periodRows.filter((e) => e.category === "company"), period.label)}
             onOpen={setDetail}
@@ -400,6 +449,12 @@ export default function App() {
           onClose={() => setJobSheet(null)}
           onSave={handleSaveJob}
           onDelete={handleDeleteJob}
+        />
+      )}
+      {reportOpen && (
+        <ReportSheet
+          entries={entries} jobStats={jobStats} startDay={startDay} vehicle={vehicle}
+          onClose={() => setReportOpen(false)}
         />
       )}
       {settingsOpen && vehicle && (
@@ -515,10 +570,16 @@ function EmptyState({ onAdd }) {
 }
 
 /* ---------------- Stats tab ---------------- */
-function StatsTab({ chart, lifetime, entries, vehicle, monthly, period, onToggleReimburse, onExport, onOpen }) {
+function StatsTab({ chart, lifetime, entries, vehicle, monthly, period, startDay, onReport, onToggleReimburse, onExport, onOpen }) {
   return (
     <div className="space-y-4">
+      <button onClick={onReport} className="w-full py-3.5 rounded-2xl text-white font-bold flex items-center justify-center gap-2 active:scale-[.99] transition" style={{ background: C.ink }}>
+        <Printer size={18} /> พิมพ์รายงานสรุป (เลือกหัวข้อได้)
+      </button>
+
       <TrendCard data={chart} />
+
+      <SpendCard entries={entries} startDay={startDay} />
 
       <div className="rounded-3xl bg-white p-6 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
         <h2 className="font-semibold mb-4">ค่าใช้งานเฉลี่ย</h2>
@@ -541,6 +602,265 @@ function StatsTab({ chart, lifetime, entries, vehicle, monthly, period, onToggle
 
       <CompanyCard monthly={monthly} period={period} onToggle={onToggleReimburse} onExport={onExport} onOpen={onOpen} />
     </div>
+  );
+}
+
+/* ---------------- ยอดตามช่วงเวลา: สัปดาห์ / เดือน(รอบ) / ปี ---------------- */
+function SpendCard({ entries, startDay }) {
+  const [mode, setMode] = useState("week");
+  const buckets = useMemo(() => {
+    let ranges = [];
+    if (mode === "week") for (let k = 0; k >= -7; k--) ranges.push(weekRange(k));
+    else if (mode === "month") for (let k = 0; k >= -11; k--) ranges.push(periodRange(startDay, k));
+    else {
+      const ys = new Set(entries.map((e) => Number(e.date.slice(0, 4))));
+      ys.add(thaiWallNow().getUTCFullYear());
+      ranges = [...ys].sort((a, b) => b - a).map(yearRange);
+    }
+    return ranges.map((r) => ({ label: r.label, ...sumRows(entries.filter((e) => inRange(e, r))) }));
+  }, [entries, startDay, mode]);
+  const max = Math.max(1, ...buckets.map((b) => b.amount));
+  const tabs = [["week", "รายสัปดาห์"], ["month", "รายเดือน"], ["year", "รายปี"]];
+  return (
+    <div className="rounded-3xl bg-white p-6 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
+      <h2 className="font-semibold mb-3">ค่าใช้จ่ายตามช่วงเวลา</h2>
+      <div className="flex gap-1 p-1 rounded-2xl mb-4" style={{ background: "#EDEBE8" }}>
+        {tabs.map(([k, l]) => (
+          <button key={k} onClick={() => setMode(k)} className="flex-1 py-2 rounded-xl text-sm font-semibold transition" style={{ background: mode === k ? "#fff" : "transparent", color: mode === k ? C.ink : C.muted }}>{l}</button>
+        ))}
+      </div>
+      <div className="space-y-3">
+        {buckets.map((b, i) => (
+          <div key={i}>
+            <div className="flex items-baseline justify-between text-sm">
+              <span style={{ fontWeight: i === 0 ? 700 : 500 }}>{b.label}{i === 0 ? " (ล่าสุด)" : ""}</span>
+              <span className="font-bold">{baht(b.amount)}</span>
+            </div>
+            <div className="h-2 rounded-full mt-1" style={{ background: "#EDEBE8" }}>
+              <div className="h-2 rounded-full" style={{ width: `${(b.amount / max) * 100}%`, background: i === 0 ? C.accent : "#CDBFA9" }} />
+            </div>
+            <p className="text-[11px] mt-0.5" style={{ color: C.muted }}>{b.count} ครั้ง · {num(b.kwh)} kWh{b.avg ? ` · เฉลี่ย ${num(b.avg)} ฿/kWh` : ""}</p>
+          </div>
+        ))}
+      </div>
+      {mode === "week" && <p className="text-[11px] mt-3" style={{ color: C.muted }}>สัปดาห์นับจันทร์–อาทิตย์</p>}
+    </div>
+  );
+}
+
+/* ---------------- รายงานพิมพ์ (ติ๊กเลือกหัวข้อ) ---------------- */
+const REPORT_SECTIONS = [
+  ["summary", "สรุปยอดรวม (บ้าน/สถานี, ส่วนตัว/บริษัท)"],
+  ["byWeek", "แยกรายสัปดาห์"],
+  ["byMonth", "แยกรายเดือน"],
+  ["byYear", "แยกรายปี"],
+  ["jobs", "ระยะทางและค่าใช้จ่ายแต่ละงาน (Job)"],
+  ["company", "รายการเบิกบริษัท (สถานะเบิก)"],
+  ["items", "รายการชาร์จทั้งหมด (ละเอียด)"],
+];
+
+function ReportBody({ title, range, rows, opts, jobStats, vehicle }) {
+  const total = sumRows(rows);
+  const asc = [...rows].sort((a, b) => (a.date < b.date ? -1 : 1));
+  const jobCodes = new Set(rows.map((e) => e.job).filter(Boolean));
+  const jobList = jobStats.filter((s) => jobCodes.has(s.code));
+  const th = "text-left py-1 pr-2 font-semibold";
+  const td = "py-1 pr-2 align-top";
+  const R = "text-right";
+  const H = ({ children }) => <h3 className="font-bold mt-5 mb-1.5 text-[15px]">{children}</h3>;
+  const GroupTable = ({ data }) => (
+    <table className="w-full text-[12px]">
+      <thead><tr style={{ borderBottom: "1px solid #999" }}><th className={th}>ช่วง</th><th className={`${th} ${R}`}>ครั้ง</th><th className={`${th} ${R}`}>kWh</th><th className={`${th} ${R}`}>บาท</th></tr></thead>
+      <tbody>
+        {data.map((g) => (
+          <tr key={g.key} style={{ borderBottom: "1px solid #e5e5e5" }}><td className={td}>{g.label}</td><td className={`${td} ${R}`}>{g.count}</td><td className={`${td} ${R}`}>{num(g.kwh)}</td><td className={`${td} ${R}`}>{num(g.amount)}</td></tr>
+        ))}
+      </tbody>
+    </table>
+  );
+  const nowStr = fmtMsDate(thaiWallNow().getTime(), true);
+  return (
+    <div style={{ color: "#222", fontSize: 13, lineHeight: 1.45 }}>
+      <h2 className="text-xl font-bold">{title}</h2>
+      <p className="text-[12px]" style={{ color: "#666" }}>
+        ช่วง: {range.label} · รถ: {vehicle?.name} · ออกรายงาน {nowStr}
+      </p>
+
+      {opts.summary && (
+        <>
+          <H>สรุปยอดรวม</H>
+          <table className="w-full text-[12px]"><tbody>
+            {[
+              ["ค่าไฟรวม", `${baht(total.amount)} (${total.count} ครั้ง)`],
+              ["พลังงานรวม", `${num(total.kwh)} kWh · เฉลี่ย ${num(total.avg)} ฿/kWh`],
+              ["ชาร์จที่บ้าน", baht(total.home)],
+              ["ชาร์จที่สถานี", baht(total.station)],
+              ["ส่วนตัว", baht(total.personal)],
+              ["บริษัท", `${baht(total.company)} (เบิกแล้ว ${baht(total.paid)} · รอเบิก ${baht(total.pending)})`],
+            ].map(([k, v]) => (
+              <tr key={k} style={{ borderBottom: "1px solid #e5e5e5" }}><td className={td} style={{ width: "34%" }}>{k}</td><td className={`${td} ${R} font-semibold`}>{v}</td></tr>
+            ))}
+          </tbody></table>
+        </>
+      )}
+
+      {opts.byWeek && <><H>แยกรายสัปดาห์ (จันทร์–อาทิตย์)</H><GroupTable data={groupRows(rows, (e) => weekStartOf(wallMs(e.date)), weekLabelOf)} /></>}
+      {opts.byMonth && <><H>แยกรายเดือน</H><GroupTable data={groupRows(rows, monthKeyOf, monthLabelOf)} /></>}
+      {opts.byYear && <><H>แยกรายปี</H><GroupTable data={groupRows(rows, (e) => Date.UTC(Number(e.date.slice(0, 4)), 0, 1), (k) => `ปี ${new Date(k).getUTCFullYear() + 543}`)} /></>}
+
+      {opts.jobs && (
+        <>
+          <H>ระยะทางและค่าใช้จ่ายแต่ละงาน</H>
+          {jobList.length === 0 ? <p className="text-[12px]" style={{ color: "#666" }}>ไม่มีรายการที่ระบุเลขงานในช่วงนี้</p> : (
+            <>
+              <table className="w-full text-[12px]">
+                <thead><tr style={{ borderBottom: "1px solid #999" }}><th className={th}>งาน</th><th className={`${th} ${R}`}>ครั้ง</th><th className={`${th} ${R}`}>ค่าไฟ (บาท)</th><th className={`${th} ${R}`}>กม.</th><th className={`${th} ${R}`}>฿/กม.</th></tr></thead>
+                <tbody>
+                  {jobList.map((s) => (
+                    <tr key={s.code} style={{ borderBottom: "1px solid #e5e5e5" }}>
+                      <td className={td}><b>{s.code}</b>{s.title ? ` · ${s.title}` : ""}</td>
+                      <td className={`${td} ${R}`}>{s.count}</td>
+                      <td className={`${td} ${R}`}>{num(s.amount)}</td>
+                      <td className={`${td} ${R}`}>{s.km ? `${num(s.km, 0)}${s.kmSource === "manual" ? "" : "*"}` : "-"}</td>
+                      <td className={`${td} ${R}`}>{s.perKm ? num(s.perKm) : "-"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="text-[11px] mt-1" style={{ color: "#666" }}>ยอดของแต่ละงานเป็นยอดรวมทั้งงาน · กม. จากระยะไป-กลับที่กรอก, * = คำนวณจากเลขไมล์สูงสุด−ต่ำสุดของงานนั้น</p>
+            </>
+          )}
+        </>
+      )}
+
+      {opts.company && (
+        <>
+          <H>รายการเบิกบริษัท</H>
+          {asc.filter((e) => e.category === "company").length === 0 ? <p className="text-[12px]" style={{ color: "#666" }}>ไม่มีรายการบริษัทในช่วงนี้</p> : (
+            <table className="w-full text-[12px]">
+              <thead><tr style={{ borderBottom: "1px solid #999" }}><th className={th}>วันที่</th><th className={th}>สถานี / เลขที่ใบเสร็จ</th><th className={th}>งาน</th><th className={`${th} ${R}`}>บาท</th><th className={`${th} ${R}`}>สถานะ</th></tr></thead>
+              <tbody>
+                {asc.filter((e) => e.category === "company").map((e) => (
+                  <tr key={e.id} style={{ borderBottom: "1px solid #e5e5e5" }}>
+                    <td className={td}>{fmtShort(e.date)}</td>
+                    <td className={td}>{e.station || e.provider}{e.receiptNo ? ` · ${e.receiptNo}` : ""}</td>
+                    <td className={td}>{e.job || "-"}</td>
+                    <td className={`${td} ${R}`}>{num(e.amount)}</td>
+                    <td className={`${td} ${R}`}>{e.reimbursed ? "เบิกแล้ว" : "รอเบิก"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </>
+      )}
+
+      {opts.items && (
+        <>
+          <H>รายการชาร์จทั้งหมด</H>
+          <table className="w-full text-[11px]">
+            <thead><tr style={{ borderBottom: "1px solid #999" }}><th className={th}>วันที่</th><th className={th}>สถานที่</th><th className={th}>ประเภท</th><th className={`${th} ${R}`}>kWh</th><th className={`${th} ${R}`}>บาท</th><th className={th}>งาน</th></tr></thead>
+            <tbody>
+              {asc.map((e) => (
+                <tr key={e.id} style={{ borderBottom: "1px solid #e5e5e5" }}>
+                  <td className={td}>{fmtShort(e.date)} {fmtTime(e.date)}</td>
+                  <td className={td}>{e.place === "home" ? "บ้าน" : e.station || e.provider || "สถานี"}</td>
+                  <td className={td}>{e.category === "company" ? "บริษัท" : "ส่วนตัว"}</td>
+                  <td className={`${td} ${R}`}>{num(e.kwh)}</td>
+                  <td className={`${td} ${R}`}>{num(e.amount)}</td>
+                  <td className={td}>{e.job || "-"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+    </div>
+  );
+}
+
+function ReportSheet({ entries, jobStats, startDay, vehicle, onClose }) {
+  const years = useMemo(() => {
+    const ys = new Set(entries.map((e) => Number(e.date.slice(0, 4))));
+    ys.add(thaiWallNow().getUTCFullYear());
+    return [...ys].sort((a, b) => b - a);
+  }, [entries]);
+  const [rangeKey, setRangeKey] = useState("period0");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [opts, setOpts] = useState({ summary: true, byWeek: false, byMonth: false, byYear: false, jobs: true, company: false, items: true });
+
+  const range = useMemo(() => {
+    if (rangeKey === "period0") return periodRange(startDay, 0);
+    if (rangeKey === "period1") return periodRange(startDay, -1);
+    if (rangeKey === "week0") return weekRange(0);
+    if (rangeKey === "week1") return weekRange(-1);
+    if (rangeKey === "all") return { start: -Infinity, end: Infinity, label: "ทั้งหมด" };
+    if (rangeKey === "custom") {
+      const s = from ? Date.parse(from + "T00:00:00Z") : -Infinity;
+      const e = to ? Date.parse(to + "T00:00:00Z") + DAY : Infinity;
+      return { start: s, end: e, label: `${from ? fmtMsDate(s, true) : "เริ่มต้น"} – ${to ? fmtMsDate(e - DAY, true) : "ปัจจุบัน"}` };
+    }
+    return yearRange(Number(rangeKey.slice(4)));
+  }, [rangeKey, from, to, startDay]);
+
+  const rows = useMemo(() => entries.filter((e) => inRange(e, range)), [entries, range]);
+  const toggle = (k) => setOpts((p) => ({ ...p, [k]: !p[k] }));
+  const anyOn = Object.values(opts).some(Boolean);
+  const body = <ReportBody title="รายงานสรุปค่าไฟ EV" range={range} rows={rows} opts={opts} jobStats={jobStats} vehicle={vehicle} />;
+  const inputCls = "w-full px-3 py-3 rounded-2xl bg-white outline-none text-base";
+
+  return (
+    <>
+      <style>{`
+        #print-root{display:none}
+        @media print{
+          #root{display:none !important}
+          #print-root{display:block !important;padding:0;background:#fff}
+          @page{size:A4;margin:14mm}
+          body{background:#fff !important}
+        }
+      `}</style>
+      {createPortal(<div id="print-root">{body}</div>, document.body)}
+      <Sheet title="พิมพ์รายงาน" onClose={onClose}>
+        <Field label="ช่วงเวลา">
+          <select value={rangeKey} onChange={(e) => setRangeKey(e.target.value)} className={inputCls}>
+            <option value="period0">รอบปัจจุบัน ({periodRange(startDay, 0).label})</option>
+            <option value="period1">รอบก่อน ({periodRange(startDay, -1).label})</option>
+            <option value="week0">สัปดาห์นี้</option>
+            <option value="week1">สัปดาห์ก่อน</option>
+            {years.map((y) => <option key={y} value={`year${y}`}>ทั้งปี {y + 543}</option>)}
+            <option value="all">ทั้งหมด</option>
+            <option value="custom">กำหนดเอง…</option>
+          </select>
+        </Field>
+        {rangeKey === "custom" && (
+          <div className="grid grid-cols-2 gap-3 mb-4">
+            <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className={inputCls} />
+            <input type="date" value={to} onChange={(e) => setTo(e.target.value)} className={inputCls} />
+          </div>
+        )}
+
+        <p className="text-sm font-medium mb-2 mt-2">เลือกหัวข้อที่จะพิมพ์</p>
+        <div className="rounded-3xl bg-white p-2 mb-4" style={{ border: `1px solid ${C.line}` }}>
+          {REPORT_SECTIONS.map(([k, label]) => (
+            <button key={k} onClick={() => toggle(k)} className="w-full flex items-center gap-3 px-3 py-3 text-left text-sm rounded-2xl active:bg-stone-100">
+              {opts[k] ? <CheckSquare size={22} color={C.accent} /> : <Square size={22} color={C.muted} />}
+              <span style={{ fontWeight: opts[k] ? 600 : 400 }}>{label}</span>
+            </button>
+          ))}
+        </div>
+
+        <p className="text-xs mb-3" style={{ color: C.muted }}>{range.label} · {rows.length} รายการ · {baht(sumRows(rows).amount)}</p>
+        <button onClick={() => window.print()} disabled={!anyOn || rows.length === 0} className="w-full py-3.5 rounded-2xl text-white font-bold flex items-center justify-center gap-2" style={{ background: C.accent, opacity: !anyOn || rows.length === 0 ? 0.4 : 1 }}>
+          <Printer size={18} /> พิมพ์ / บันทึกเป็น PDF
+        </button>
+        <p className="text-[11px] mt-2 text-center" style={{ color: C.muted }}>ในหน้าต่างพิมพ์ เลือก "บันทึกเป็น PDF" เพื่อเก็บหรือส่งต่อได้</p>
+
+        <p className="text-sm font-medium mt-6 mb-2">ตัวอย่างรายงาน</p>
+        <div className="rounded-2xl bg-white p-4 overflow-x-auto" style={{ border: `1px solid ${C.line}` }}>{body}</div>
+      </Sheet>
+    </>
   );
 }
 
