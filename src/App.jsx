@@ -262,7 +262,7 @@ export default function App() {
   const jobStats = useMemo(() => {
     const map = new Map();
     const get = (code) => {
-      if (!map.has(code)) map.set(code, { code, title: "", roundTripKm: 0, count: 0, amount: 0, kwh: 0, odos: [] });
+      if (!map.has(code)) map.set(code, { code, title: "", roundTripKm: 0, count: 0, amount: 0, kwh: 0, odos: [], odoRows: [] });
       return map.get(code);
     };
     jobs.forEach((j) => {
@@ -274,12 +274,23 @@ export default function App() {
       if (!e.job) return;
       const s = get(e.job);
       s.count += 1; s.amount += e.amount; s.kwh += e.kwh;
-      if (e.odo > 0) s.odos.push(e.odo);
+      if (e.odo > 0) { s.odos.push(e.odo); s.odoRows.push(e); }
     });
     return [...map.values()].map((s) => {
       const kmAuto = s.odos.length >= 2 ? Math.max(...s.odos) - Math.min(...s.odos) : 0;
       const km = s.roundTripKm > 0 ? s.roundTripKm : kmAuto;
-      return { ...s, km, kmSource: s.roundTripKm > 0 ? "manual" : kmAuto > 0 ? "odo" : "none", perKm: km > 0 ? s.amount / km : 0 };
+      const kmSource = s.roundTripKm > 0 ? "manual" : kmAuto > 0 ? "odo" : "none";
+      // จากเลขไมล์: บิลที่ไมล์ต่ำสุดคือไฟที่ชาร์จก่อนเริ่มวิ่ง จึงไม่นับเป็นค่าไฟของระยะนี้
+      const minOdo = s.odos.length ? Math.min(...s.odos) : 0;
+      const used = kmSource === "odo" ? s.odoRows.filter((e) => e.odo > minOdo) : null;
+      const amtForKm = used ? used.reduce((a, e) => a + e.amount, 0) : s.amount;
+      const kwhForKm = used ? used.reduce((a, e) => a + e.kwh, 0) : s.kwh;
+      return {
+        ...s, km, kmSource,
+        perKm: km > 0 ? amtForKm / km : 0,
+        kwhPer100: km > 0 ? (kwhForKm / km) * 100 : 0,
+        perCharge: s.count ? s.amount / s.count : 0,
+      };
     }).sort((a, b) => b.count - a.count || a.code.localeCompare(b.code));
   }, [jobs, entries]);
 
@@ -1076,7 +1087,7 @@ function JobsTab({ stats, onOpen, onNew }) {
                 <p className="text-sm font-bold">{s.perKm > 0 ? num(s.perKm) : "-"}</p>
               </div>
             </div>
-            <p className="text-[11px] mt-2" style={{ color: C.muted }}>ชาร์จ {s.count} ครั้ง · {num(s.kwh, 1)} kWh</p>
+            <p className="text-[11px] mt-2" style={{ color: C.muted }}>ชาร์จ {s.count} ครั้ง · {num(s.kwh, 1)} kWh · เฉลี่ย {baht(s.perCharge)}/ครั้ง{s.kwhPer100 > 0 ? ` · ${num(s.kwhPer100, 1)} kWh/100 กม.` : ""}</p>
           </button>
         ))}
       </div>
