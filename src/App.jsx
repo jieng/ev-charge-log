@@ -654,7 +654,7 @@ const REPORT_SECTIONS = [
   ["byWeek", "แยกรายสัปดาห์"],
   ["byMonth", "แยกรายเดือน"],
   ["byYear", "แยกรายปี"],
-  ["jobs", "ระยะทางและค่าใช้จ่ายแต่ละงาน (Job)"],
+  ["jobs", "ระยะทางและค่าใช้จ่ายแต่ละงาน/ทริป"],
   ["company", "รายการเบิกบริษัท (สถานะเบิก)"],
   ["items", "รายการชาร์จทั้งหมด (ละเอียด)"],
 ];
@@ -710,11 +710,11 @@ function ReportBody({ title, range, rows, opts, jobStats, vehicle }) {
 
       {opts.jobs && (
         <>
-          <H>ระยะทางและค่าใช้จ่ายแต่ละงาน</H>
-          {jobList.length === 0 ? <p className="text-[12px]" style={{ color: "#666" }}>ไม่มีรายการที่ระบุเลขงานในช่วงนี้</p> : (
+          <H>ระยะทางและค่าใช้จ่ายแต่ละงาน/ทริป</H>
+          {jobList.length === 0 ? <p className="text-[12px]" style={{ color: "#666" }}>ไม่มีรายการที่ระบุงานหรือทริปในช่วงนี้</p> : (
             <>
               <table className="w-full text-[12px]">
-                <thead><tr style={{ borderBottom: "1px solid #999" }}><th className={th}>งาน</th><th className={`${th} ${R}`}>ครั้ง</th><th className={`${th} ${R}`}>ค่าไฟ (บาท)</th><th className={`${th} ${R}`}>กม.</th><th className={`${th} ${R}`}>฿/กม.</th></tr></thead>
+                <thead><tr style={{ borderBottom: "1px solid #999" }}><th className={th}>งาน/ทริป</th><th className={`${th} ${R}`}>ครั้ง</th><th className={`${th} ${R}`}>ค่าไฟ (บาท)</th><th className={`${th} ${R}`}>กม.</th><th className={`${th} ${R}`}>฿/กม.</th></tr></thead>
                 <tbody>
                   {jobList.map((s) => (
                     <tr key={s.code} style={{ borderBottom: "1px solid #e5e5e5" }}>
@@ -1039,17 +1039,17 @@ function JobsTab({ stats, onOpen, onNew }) {
     <div>
       <div className="flex items-center justify-between mb-4">
         <div>
-          <h2 className="text-xl font-bold">งาน (Job)</h2>
-          <p className="text-xs mt-0.5" style={{ color: C.muted }}>ดูค่าชาร์จและระยะทางแยกตามเลขงาน</p>
+          <h2 className="text-xl font-bold">งาน / ทริป</h2>
+          <p className="text-xs mt-0.5" style={{ color: C.muted }}>ดูค่าชาร์จและระยะทางแยกตามเลขงาน หรือทริปเที่ยว (ใช้ได้ทั้งส่วนตัวและบริษัท)</p>
         </div>
         <button onClick={onNew} className="flex items-center gap-1.5 px-4 py-2.5 rounded-2xl text-white text-sm font-semibold" style={{ background: C.ink }}>
-          <Plus size={16} /> เพิ่มงาน
+          <Plus size={16} /> เพิ่ม
         </button>
       </div>
       {stats.length === 0 && (
         <div className="rounded-3xl bg-white p-8 text-center" style={{ border: `1px dashed ${C.line}` }}>
-          <p className="font-semibold mb-1">ยังไม่มีงาน</p>
-          <p className="text-sm" style={{ color: C.muted }}>ใส่เลขงานตอนบันทึกค่าชาร์จ หรือกด "เพิ่มงาน" ได้เลย</p>
+          <p className="font-semibold mb-1">ยังไม่มีงานหรือทริป</p>
+          <p className="text-sm" style={{ color: C.muted }}>ใส่เลขงานหรือชื่อทริป (เช่น ทริปหัวหิน) ตอนบันทึกค่าชาร์จ หรือกด "เพิ่ม" ได้เลย</p>
         </div>
       )}
       <div className="space-y-3">
@@ -1113,7 +1113,7 @@ function JobSheet({ isNew, stat, entries, onClose, onSave, onDelete }) {
   };
 
   return (
-    <Sheet title={isNew ? "เพิ่มงานใหม่" : `งาน ${stat?.code}`} onClose={onClose}>
+    <Sheet title={isNew ? "เพิ่มงาน/ทริปใหม่" : `งาน ${stat?.code}`} onClose={onClose}>
       {stat && (
         <div className="grid grid-cols-2 gap-3 mb-5">
           <Stat label="ค่าชาร์จรวม" value={baht(stat.amount)} unit={`${stat.count} ครั้ง · ${num(stat.kwh, 1)} kWh`} big />
@@ -1121,7 +1121,7 @@ function JobSheet({ isNew, stat, entries, onClose, onSave, onDelete }) {
         </div>
       )}
 
-      <Field label="เลขงาน">
+      <Field label="เลขงาน หรือ ชื่อทริป">
         <input value={code} onChange={(e) => setCode(e.target.value)} readOnly={!isNew} placeholder="เช่น 1234" className={inputCls} style={!isNew ? { opacity: 0.6 } : undefined} />
       </Field>
       <Field label="ชื่อ/รายละเอียดงาน (ไม่บังคับ)">
@@ -1306,8 +1306,8 @@ function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
         <p className="text-xs mb-4 -mt-2 px-1" style={{ color: C.red }}>⚠️ AI อ่านวันที่ในใบเสร็จไม่ชัด ใช้วันนี้แทนไว้ก่อน กรุณาตรวจสอบและแก้ไขให้ตรงกับใบเสร็จจริง</p>
       )}
 
-      <Field label="เลขงาน (Job)">
-        <input list="jobs-list" value={f.job} onChange={(e) => set("job", e.target.value)} placeholder="เช่น 1234 (ไม่บังคับ)" className={inputCls} />
+      <Field label="งาน / ทริป (ไม่บังคับ)">
+        <input list="jobs-list" value={f.job} onChange={(e) => set("job", e.target.value)} placeholder="เช่น 1234 หรือ ทริปหัวหิน" className={inputCls} />
       </Field>
 
       <Field label="ใช้สำหรับ">
@@ -1418,8 +1418,8 @@ function DetailSheet({ e, avgRate, onClose, onDelete, onSaveEdit, onToggleReimbu
           <Field label="ยอดเงิน (฿)"><input type="number" inputMode="decimal" value={f.amount} onChange={(ev) => set("amount", ev.target.value)} className={inputCls} /></Field>
           <Field label="พลังงาน (kWh)"><input type="number" inputMode="decimal" value={f.kwh} onChange={(ev) => set("kwh", ev.target.value)} className={inputCls} /></Field>
         </div>
-        <Field label="เลขงาน (Job)">
-          <input list="jobs-list" value={f.job} onChange={(ev) => set("job", ev.target.value)} placeholder="ไม่บังคับ" className={inputCls} />
+        <Field label="งาน / ทริป (ไม่บังคับ)">
+          <input list="jobs-list" value={f.job} onChange={(ev) => set("job", ev.target.value)} placeholder="เช่น 1234 หรือ ทริปหัวหิน" className={inputCls} />
         </Field>
         <Field label="ใช้สำหรับ">
           <div className="grid grid-cols-2 gap-2">
@@ -1535,7 +1535,7 @@ function NavBar({ tab, setTab }) {
   const items = [
     { k: "log", label: "บันทึก", icon: List },
     { k: "stats", label: "สรุป", icon: Calendar },
-    { k: "jobs", label: "งาน", icon: Briefcase },
+    { k: "jobs", label: "งาน/ทริป", icon: Briefcase },
   ];
   return (
     <div className="fixed bottom-5 left-0 right-0 flex justify-center px-5">
