@@ -262,13 +262,15 @@ export default function App() {
   const jobStats = useMemo(() => {
     const map = new Map();
     const get = (code) => {
-      if (!map.has(code)) map.set(code, { code, title: "", roundTripKm: 0, count: 0, amount: 0, kwh: 0, odos: [], odoRows: [] });
+      if (!map.has(code)) map.set(code, { code, title: "", roundTripKm: 0, startOdo: 0, endOdo: 0, count: 0, amount: 0, kwh: 0, odos: [], odoRows: [] });
       return map.get(code);
     };
     jobs.forEach((j) => {
       const s = get(j.code);
       s.title = j.title || "";
       s.roundTripKm = Number(j.round_trip_km) || 0;
+      s.startOdo = Number(j.start_odo) || 0;
+      s.endOdo = Number(j.end_odo) || 0;
     });
     entries.forEach((e) => {
       if (!e.job) return;
@@ -277,12 +279,15 @@ export default function App() {
       if (e.odo > 0) { s.odos.push(e.odo); s.odoRows.push(e); }
     });
     return [...map.values()].map((s) => {
-      const kmAuto = s.odos.length >= 2 ? Math.max(...s.odos) - Math.min(...s.odos) : 0;
+      const pts = [...s.odos, ...(s.startOdo > 0 ? [s.startOdo] : []), ...(s.endOdo > 0 ? [s.endOdo] : [])];
+      const kmAuto = pts.length >= 2 ? Math.max(...pts) - Math.min(...pts) : 0;
       const km = s.roundTripKm > 0 ? s.roundTripKm : kmAuto;
-      const kmSource = s.roundTripKm > 0 ? "manual" : kmAuto > 0 ? "odo" : "none";
-      // จากเลขไมล์: บิลที่ไมล์ต่ำสุดคือไฟที่ชาร์จก่อนเริ่มวิ่ง จึงไม่นับเป็นค่าไฟของระยะนี้
+      const tripOdo = s.startOdo > 0 || s.endOdo > 0;
+      const kmSource = s.roundTripKm > 0 ? "manual" : kmAuto > 0 ? (tripOdo ? "trip" : "odo") : "none";
+      // บิลที่ไมล์ต่ำสุดคือไฟที่ชาร์จก่อนเริ่มวิ่ง จึงไม่นับ ยกเว้นมีไมล์เริ่มต้นที่ต่ำกว่าบิลนั้น
       const minOdo = s.odos.length ? Math.min(...s.odos) : 0;
-      const used = kmSource === "odo" ? s.odoRows.filter((e) => e.odo > minOdo) : null;
+      const skipFirst = (kmSource === "odo") || (kmSource === "trip" && !(s.startOdo > 0 && s.startOdo < minOdo));
+      const used = kmSource === "odo" || kmSource === "trip" ? s.odoRows.filter((e) => !skipFirst || e.odo > minOdo) : null;
       const amtForKm = used ? used.reduce((a, e) => a + e.amount, 0) : s.amount;
       const kwhForKm = used ? used.reduce((a, e) => a + e.kwh, 0) : s.kwh;
       return {
@@ -293,6 +298,22 @@ export default function App() {
       };
     }).sort((a, b) => b.count - a.count || a.code.localeCompare(b.code));
   }, [jobs, entries]);
+
+  // ต่อบิล: ระยะจากการชาร์จครั้งก่อน (เรียงตามเวลา) และ ฿/กม. ของบิลนั้น; ถ้างานมีไมล์เริ่ม บิลแรกของงานใช้ไมล์เริ่มเป็นจุดเริ่ม
+  const billKm = useMemo(() => {
+    const m = new Map();
+    const startOf = new Map(jobStats.filter((s) => s.startOdo > 0).map((s) => [s.code, s.startOdo]));
+    const seq = entries.filter((e) => e.odo > 0).sort((a, b) => (a.date < b.date ? -1 : 1));
+    const firstSeen = new Set();
+    seq.forEach((e, i) => {
+      let prev = i > 0 ? seq[i - 1].odo : 0;
+      if (e.job && startOf.has(e.job) && !firstSeen.has(e.job)) { prev = startOf.get(e.job); }
+      if (e.job) firstSeen.add(e.job);
+      const km = e.odo - prev;
+      if (prev > 0 && km > 0) m.set(e.id, { km, perKm: e.amount / km, kwh100: (e.kwh / km) * 100 });
+    });
+    return m;
+  }, [entries, jobStats]);
 
   const shiftPeriod = (d) => setPeriodOffset((p) => Math.min(0, p + d));
 
@@ -345,8 +366,8 @@ export default function App() {
     setDetail((d) => (d && d.id === e.id ? updated : d));
   };
 
-  const handleSaveJob = async ({ code, title, round_trip_km }) => {
-    const row = await upsertJob({ user_id: session.user.id, code, title: title || null, round_trip_km });
+  const handleSaveJob = async ({ code, title, round_trip_km, start_odo, end_odo }) => {
+    const row = await upsertJob({ user_id: session.user.id, code, title: title || null, round_trip_km, start_odo, end_odo });
     setJobs((p) => [row, ...p.filter((j) => j.code !== row.code)]);
   };
 
@@ -444,6 +465,7 @@ export default function App() {
       {detail && (
         <DetailSheet
           e={detail}
+          billKm={billKm}
           avgRate={lifetime.avgRate}
           onClose={() => setDetail(null)}
           onDelete={handleDelete}
@@ -457,6 +479,7 @@ export default function App() {
           isNew={jobSheet === "new"}
           stat={activeJobStat}
           entries={entries}
+          billKm={billKm}
           onClose={() => setJobSheet(null)}
           onSave={handleSaveJob}
           onDelete={handleDeleteJob}
@@ -1095,10 +1118,12 @@ function JobsTab({ stats, onOpen, onNew }) {
   );
 }
 
-function JobSheet({ isNew, stat, entries, onClose, onSave, onDelete }) {
+function JobSheet({ isNew, stat, entries, billKm, onClose, onSave, onDelete }) {
   const [code, setCode] = useState(stat?.code || "");
   const [title, setTitle] = useState(stat?.title || "");
   const [km, setKm] = useState(stat?.roundTripKm ? String(stat.roundTripKm) : "");
+  const [startOdo, setStartOdo] = useState(stat?.startOdo ? String(stat.startOdo) : "");
+  const [endOdo, setEndOdo] = useState(stat?.endOdo ? String(stat.endOdo) : "");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -1109,7 +1134,7 @@ function JobSheet({ isNew, stat, entries, onClose, onSave, onDelete }) {
     if (!c) { setErr("ใส่เลขงานก่อน"); return; }
     setBusy(true); setErr("");
     try {
-      await onSave({ code: c, title: title.trim(), round_trip_km: parseFloat(km) > 0 ? parseFloat(km) : null });
+      await onSave({ code: c, title: title.trim(), round_trip_km: parseFloat(km) > 0 ? parseFloat(km) : null, start_odo: parseInt(startOdo) > 0 ? parseInt(startOdo) : null, end_odo: parseInt(endOdo) > 0 ? parseInt(endOdo) : null });
       onClose();
     } catch (e) {
       setErr("บันทึกไม่สำเร็จ ลองใหม่อีกครั้ง");
@@ -1128,7 +1153,7 @@ function JobSheet({ isNew, stat, entries, onClose, onSave, onDelete }) {
       {stat && (
         <div className="grid grid-cols-2 gap-3 mb-5">
           <Stat label="ค่าชาร์จรวม" value={baht(stat.amount)} unit={`${stat.count} ครั้ง · ${num(stat.kwh, 1)} kWh`} big />
-          <Stat label="ต้นทุนต่อกิโล" value={stat.perKm > 0 ? num(stat.perKm) : "-"} unit={stat.km > 0 ? `฿/กม. (${stat.kmSource === "manual" ? "ระยะกรอกเอง" : "จากเลขไมล์"})` : "ใส่ระยะทางด้านล่าง"} big />
+          <Stat label="ต้นทุนต่อกิโล" value={stat.perKm > 0 ? num(stat.perKm) : "-"} unit={stat.km > 0 ? `฿/กม. (${stat.kmSource === "manual" ? "ระยะกรอกเอง" : stat.kmSource === "trip" ? "ไมล์เริ่ม/จบ" : "จากเลขไมล์"})` : "ใส่ระยะทางด้านล่าง"} big />
         </div>
       )}
 
@@ -1140,8 +1165,17 @@ function JobSheet({ isNew, stat, entries, onClose, onSave, onDelete }) {
       </Field>
       <Field label="ระยะทางไป-กลับ (กม.)">
         <input type="number" inputMode="decimal" value={km} onChange={(e) => setKm(e.target.value)} placeholder="เช่น 240" className={inputCls} />
-        <p className="text-xs mt-1.5" style={{ color: C.muted }}>ไม่ใส่ก็ได้ ถ้ามีเลขไมล์ในรายการชาร์จ ระบบคำนวณระยะให้เอง</p>
+        <p className="text-xs mt-1.5" style={{ color: C.muted }}>ไม่ใส่ก็ได้ ถ้ามีเลขไมล์ ระบบคำนวณระยะให้เอง</p>
       </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="ไมล์ตอนออกเดินทาง">
+          <input type="number" inputMode="numeric" value={startOdo} onChange={(e) => setStartOdo(e.target.value)} placeholder="ก่อนชาร์จก็ได้" className={inputCls} />
+        </Field>
+        <Field label="ไมล์ตอนจบทริป">
+          <input type="number" inputMode="numeric" value={endOdo} onChange={(e) => setEndOdo(e.target.value)} placeholder="ถึงที่หมาย" className={inputCls} />
+        </Field>
+      </div>
+      <p className="text-xs -mt-2 mb-4" style={{ color: C.muted }}>ดูเลขไมล์จากหน้าปัดรถตอนออก/ถึง แล้วกรอกที่นี่ภายหลังได้ ไม่ต้องรอตอนชาร์จ ถ้ากรอกระยะไป-กลับไว้ ระบบจะใช้ระยะนั้นก่อน</p>
 
       {err && <p className="text-sm mb-3" style={{ color: C.red }}>{err}</p>}
       <button onClick={save} disabled={busy} className="w-full py-3.5 rounded-2xl text-white font-bold flex items-center justify-center gap-2 mb-3" style={{ background: C.accent }}>
@@ -1153,7 +1187,10 @@ function JobSheet({ isNew, stat, entries, onClose, onSave, onDelete }) {
           <p className="text-sm font-semibold mb-2" style={{ color: C.muted }}>รายการชาร์จของงานนี้</p>
           {rows.map((e) => (
             <div key={e.id} className="flex justify-between py-2 text-sm" style={{ borderBottom: `1px solid ${C.line}` }}>
-              <span className="truncate">{fmtShort(e.date)} · {e.station || e.provider}</span>
+              <span className="truncate">
+                {fmtShort(e.date)} · {e.station || e.provider}
+                {billKm?.get(e.id) && <span className="block text-[11px]" style={{ color: C.muted }}>{num(billKm.get(e.id).km, 0)} กม. จากครั้งก่อน · ฿{num(billKm.get(e.id).perKm)}/กม.</span>}
+              </span>
               <span className="font-semibold ml-3 shrink-0">{baht(e.amount)}</span>
             </div>
           ))}
@@ -1364,7 +1401,7 @@ function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
 }
 
 /* ---------------- Detail / Edit ---------------- */
-function DetailSheet({ e, avgRate, onClose, onDelete, onSaveEdit, onToggleReimburse }) {
+function DetailSheet({ e, billKm, avgRate, onClose, onDelete, onSaveEdit, onToggleReimburse }) {
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -1482,7 +1519,8 @@ function DetailSheet({ e, avgRate, onClose, onDelete, onSaveEdit, onToggleReimbu
         <Row k="สถานี" v={e.station} />
         <Row k="ประเภท" v={e.conn} />
         <Row k="หมวด" v={e.category === "company" ? (e.reimbursed ? "บริษัท · เบิกแล้ว" : "บริษัท · รอเบิก") : "ส่วนตัว"} />
-        {e.job && <Row k="เลขงาน" v={e.job} />}
+        {e.job && <Row k="งาน/ทริป" v={e.job} />}
+        {billKm?.get(e.id) && <Row k="ระยะจากชาร์จครั้งก่อน" v={`${num(billKm.get(e.id).km, 0)} กม. · ฿${num(billKm.get(e.id).perKm)}/กม. · ${num(billKm.get(e.id).kwh100, 1)} kWh/100 กม.`} />}
         {e.receiptNo && <Row k="เลขที่ใบเสร็จ" v={e.receiptNo} />}
         {e.odo > 0 && <Row k="เลขไมล์" v={`${e.odo.toLocaleString()} กม.`} />}
         {e.note && <Row k="หมายเหตุ" v={e.note} />}
