@@ -13,8 +13,8 @@ import Login from "./components/Login";
 import SettingsSheet from "./components/Settings";
 
 const C = {
-  accent: "#A98C67", accentSoft: "#EFE7DB", ink: "#3A322A",
-  bg: "#F2F1EF", line: "#E5E2DE", muted: "#8A8279", green: "#5B8C6E", red: "#B4634F",
+  accent: "#0E7490", accentSoft: "#DCEFF3", ink: "#164E63",
+  bg: "#F4FAFB", line: "#CFE8EE", muted: "#475569", green: "#15803D", red: "#B91C1C",
 };
 
 const PROVIDERS = [
@@ -222,8 +222,12 @@ export default function App() {
     const avgRate = totalKwh ? totalAmt / totalKwh : 0;
     let km = 0, kwhForKm = 0, amtForKm = 0;
     if (byOdo.length >= 2) {
-      km = byOdo[byOdo.length - 1].odo - byOdo[0].odo;
-      for (let i = 1; i < byOdo.length; i++) { kwhForKm += byOdo[i].kwh; amtForKm += byOdo[i].amount; }
+      const lo = byOdo[0], hi = byOdo[byOdo.length - 1];
+      km = hi.odo - lo.odo;
+      // ไฟที่ใช้วิ่งระยะนี้ = ทุกบิลหลังบิลที่ไมล์ต่ำสุด จนถึงบิลที่ไมล์สูงสุด (รวมบิลที่ไม่ได้ใส่เลขไมล์ด้วย)
+      entries.forEach((e) => {
+        if (e.date > lo.date && e.date <= hi.date) { kwhForKm += e.kwh; amtForKm += e.amount; }
+      });
     }
     return { totalKwh, totalAmt, avgRate, km, bahtPerKm: km ? amtForKm / km : 0, kwhPer100: km ? (kwhForKm / km) * 100 : 0 };
   }, [entries]);
@@ -262,7 +266,7 @@ export default function App() {
   const jobStats = useMemo(() => {
     const map = new Map();
     const get = (code) => {
-      if (!map.has(code)) map.set(code, { code, title: "", roundTripKm: 0, startOdo: 0, endOdo: 0, count: 0, amount: 0, kwh: 0, odos: [], odoRows: [] });
+      if (!map.has(code)) map.set(code, { code, title: "", roundTripKm: 0, startOdo: 0, endOdo: 0, count: 0, amount: 0, kwh: 0, odos: [], odoRows: [], rows: [] });
       return map.get(code);
     };
     jobs.forEach((j) => {
@@ -276,20 +280,24 @@ export default function App() {
       if (!e.job) return;
       const s = get(e.job);
       s.count += 1; s.amount += e.amount; s.kwh += e.kwh;
+      s.rows.push(e);
       if (e.odo > 0) { s.odos.push(e.odo); s.odoRows.push(e); }
     });
     return [...map.values()].map((s) => {
+      const bothTrip = s.startOdo > 0 && s.endOdo > s.startOdo;
       const pts = [...s.odos, ...(s.startOdo > 0 ? [s.startOdo] : []), ...(s.endOdo > 0 ? [s.endOdo] : [])];
-      const kmAuto = pts.length >= 2 ? Math.max(...pts) - Math.min(...pts) : 0;
+      const kmAuto = bothTrip ? s.endOdo - s.startOdo : pts.length >= 2 ? Math.max(...pts) - Math.min(...pts) : 0;
       const km = s.roundTripKm > 0 ? s.roundTripKm : kmAuto;
       const tripOdo = s.startOdo > 0 || s.endOdo > 0;
       const kmSource = s.roundTripKm > 0 ? "manual" : kmAuto > 0 ? (tripOdo ? "trip" : "odo") : "none";
-      // บิลที่ไมล์ต่ำสุดคือไฟที่ชาร์จก่อนเริ่มวิ่ง จึงไม่นับ ยกเว้นมีไมล์เริ่มต้นที่ต่ำกว่าบิลนั้น
+      // บิลที่ใช้คิด ฿/กม.: ถ้ากรอกระยะเอง หรือมีไมล์ออกเดินทางต่ำกว่าบิลแรก ใช้ทุกบิลของงาน;
+      // นอกนั้นตัดบิลที่ไมล์ต่ำสุด (ชาร์จก่อนเริ่มวิ่ง) แต่นับบิลที่ไม่มีเลขไมล์ซึ่งอยู่หลังจากนั้น
       const minOdo = s.odos.length ? Math.min(...s.odos) : 0;
-      const skipFirst = (kmSource === "odo") || (kmSource === "trip" && !(s.startOdo > 0 && s.startOdo < minOdo));
-      const used = kmSource === "odo" || kmSource === "trip" ? s.odoRows.filter((e) => !skipFirst || e.odo > minOdo) : null;
-      const amtForKm = used ? used.reduce((a, e) => a + e.amount, 0) : s.amount;
-      const kwhForKm = used ? used.reduce((a, e) => a + e.kwh, 0) : s.kwh;
+      const firstBill = s.odoRows.find((e) => e.odo === minOdo);
+      const allBills = kmSource === "manual" || kmSource === "none" || bothTrip || (s.startOdo > 0 && s.startOdo <= minOdo);
+      const used = allBills ? s.rows : s.rows.filter((e) => firstBill && e.date > firstBill.date);
+      const amtForKm = used.reduce((a, e) => a + e.amount, 0);
+      const kwhForKm = used.reduce((a, e) => a + e.kwh, 0);
       return {
         ...s, km, kmSource,
         perKm: km > 0 ? amtForKm / km : 0,
@@ -310,7 +318,9 @@ export default function App() {
       if (e.job && startOf.has(e.job) && !firstSeen.has(e.job)) { prev = startOf.get(e.job); }
       if (e.job) firstSeen.add(e.job);
       const km = e.odo - prev;
-      if (prev > 0 && km > 0) m.set(e.id, { km, perKm: e.amount / km, kwh100: (e.kwh / km) * 100 });
+      const kwh100 = km > 0 ? (e.kwh / km) * 100 : 0;
+      // ชาร์จบางส่วน/ไมล์ข้ามช่วง ทำให้ตัวเลขต่อบิลเพี้ยน: แสดงเฉพาะค่าที่สมเหตุสมผล (8–35 kWh/100 กม.)
+      if (prev > 0 && km > 0 && kwh100 >= 8 && kwh100 <= 35) m.set(e.id, { km, perKm: e.amount / km, kwh100 });
     });
     return m;
   }, [entries, jobStats]);
@@ -334,6 +344,11 @@ export default function App() {
   };
 
   const handleAdd = async (payload) => {
+    const amt = Number(payload.amount), kw = Number(payload.kwh);
+    const dup = entries.find((e) => Math.abs(e.amount - amt) < 0.005 && Math.abs(e.kwh - kw) < 0.005 && Math.abs(wallMs(e.date) - wallMs(payload.date)) < 48 * 3600 * 1000);
+    if (dup && !window.confirm(`มีรายการที่ยอดและ kWh เท่ากันใกล้กัน (${fmtShort(dup.date)} ${dup.station || dup.provider || ""}) แน่ใจว่าจะบันทึกซ้ำ?`)) {
+      throw new Error("ยกเลิก: อาจซ้ำ");
+    }
     const row = await addCharge(toRow(payload, session.user.id, vehicle.id));
     setEntries((p) => [fromRow(row), ...p]);
     touchJob(payload.job);
@@ -409,7 +424,7 @@ export default function App() {
           </div>
         </header>
 
-        {loadErr && <p className="text-sm mb-4 p-3 rounded-2xl" style={{ background: "#F7ECE9", color: C.red }}>{loadErr}</p>}
+        {loadErr && <p className="text-sm mb-4 p-3 rounded-2xl" style={{ background: "#FDECEC", color: C.red }}>{loadErr}</p>}
 
         {tab === "log" && (
           <>
@@ -539,7 +554,7 @@ function SummaryCard({ monthly, yearly, period, shiftPeriod, canNext }) {
 
 function Pill({ icon, label, value, highlight }) {
   return (
-    <div className="rounded-2xl px-4 py-3" style={{ background: highlight ? C.accentSoft : "#F7F6F4" }}>
+    <div className="rounded-2xl px-4 py-3" style={{ background: highlight ? C.accentSoft : "#F4FAFB" }}>
       <div className="flex items-center gap-1.5 text-xs mb-0.5" style={{ color: C.muted }}>{icon}{label}</div>
       <div className="font-semibold text-sm">{value}</div>
     </div>
@@ -554,20 +569,20 @@ function EntryCard({ e, avgRate, onClick }) {
   return (
     <button onClick={onClick} className="w-full text-left rounded-3xl bg-white p-4 shadow-sm active:scale-[0.99] transition" style={{ border: `1px solid ${C.line}` }}>
       <div className="flex items-start gap-3">
-        <div className="w-11 h-11 rounded-2xl flex items-center justify-center shrink-0" style={{ background: e.place === "home" ? C.accentSoft : "#F0F0EE" }}>
+        <div className="w-11 h-11 rounded-2xl flex items-center justify-center shrink-0" style={{ background: e.place === "home" ? C.accentSoft : "#EDF4F7" }}>
           {e.place === "home" ? <Home size={18} color={C.accent} /> : <Zap size={18} color={C.ink} />}
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <p className="font-semibold truncate">{e.place === "home" ? "ชาร์จที่บ้าน" : e.provider}</p>
-            <span className="text-[10px] px-1.5 py-0.5 rounded-md shrink-0" style={{ background: e.conn === "DC" ? C.ink : "#EDEBE8", color: e.conn === "DC" ? "#fff" : C.muted }}>{e.conn}</span>
+            <span className="text-[10px] px-1.5 py-0.5 rounded-md shrink-0" style={{ background: e.conn === "DC" ? C.ink : "#E8F1F6", color: e.conn === "DC" ? "#fff" : C.muted }}>{e.conn}</span>
             {e.category === "company" && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded-md shrink-0" style={{ background: e.reimbursed ? "#EDF3EF" : C.accentSoft, color: e.reimbursed ? C.green : C.accent }}>
+              <span className="text-[10px] px-1.5 py-0.5 rounded-md shrink-0" style={{ background: e.reimbursed ? "#E6F4EE" : C.accentSoft, color: e.reimbursed ? C.green : C.accent }}>
                 {e.reimbursed ? "บริษัท · เบิกแล้ว" : "บริษัท · รอเบิก"}
               </span>
             )}
             {e.job && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded-md shrink-0" style={{ background: "#EDEBE8", color: C.ink }}>งาน {e.job}</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded-md shrink-0" style={{ background: "#E8F1F6", color: C.ink }}>งาน {e.job}</span>
             )}
           </div>
           <p className="text-xs mt-0.5 truncate" style={{ color: C.muted }}>
@@ -615,6 +630,8 @@ function StatsTab({ chart, lifetime, entries, vehicle, monthly, period, startDay
 
       <SpendCard entries={entries} startDay={startDay} />
 
+      <DataCheckCard entries={entries} onOpen={onOpen} />
+
       <div className="rounded-3xl bg-white p-6 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
         <h2 className="font-semibold mb-4">ค่าใช้งานเฉลี่ย</h2>
         <div className="grid grid-cols-2 gap-3">
@@ -639,6 +656,51 @@ function StatsTab({ chart, lifetime, entries, vehicle, monthly, period, startDay
   );
 }
 
+/* ---------------- ตรวจข้อมูล: หารายการที่น่าจะซ้ำ/ผิด ---------------- */
+function findIssues(entries) {
+  const out = [];
+  const add = (e, why) => out.push({ e, why });
+  const byDate = [...entries].sort((a, b) => (a.date < b.date ? -1 : 1));
+  const nowYear = thaiWallNow().getUTCFullYear();
+  byDate.forEach((e, i) => {
+    const y = Number(e.date.slice(0, 4));
+    if (y < nowYear - 0 && byDate.some((o) => o.date.slice(0, 4) === String(nowYear))) add(e, `ปี ${y + 543} ต่างจากรายการอื่น ตรวจว่าอ่านปีผิดหรือไม่`);
+    const rate = e.kwh ? e.amount / e.kwh : 0;
+    if (rate > 0 && (rate < 3 || rate > 12)) add(e, `ราคา ${num(rate)} ฿/kWh ผิดปกติ ตรวจยอดเงินหรือ kWh`);
+    if ((e.station || "").length > 70) add(e, "ชื่อสถานียาวผิดปกติ (อาจอ่านซ้ำคำ)");
+    const prev = byDate.slice(0, i).reverse().find((o) => o.odo > 0);
+    if (e.odo > 0 && prev && e.odo < prev.odo) add(e, `เลขไมล์ ${e.odo.toLocaleString()} น้อยกว่ารายการก่อนหน้า (${prev.odo.toLocaleString()})`);
+    const twin = byDate.slice(0, i).find((o) => Math.abs(o.amount - e.amount) < 0.005 && Math.abs(o.kwh - e.kwh) < 0.005 && Math.abs(wallMs(o.date) - wallMs(e.date)) < 72 * 3600 * 1000);
+    if (twin) add(e, `ซ้ำกับรายการ ${fmtShort(twin.date)} (ยอดและ kWh เท่ากัน)`);
+  });
+  return out;
+}
+
+function DataCheckCard({ entries, onOpen }) {
+  const issues = useMemo(() => findIssues(entries), [entries]);
+  const [open, setOpen] = useState(false);
+  if (issues.length === 0) return null;
+  const shown = open ? issues : issues.slice(0, 3);
+  return (
+    <div className="rounded-3xl bg-white p-5 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
+      <div className="flex items-center justify-between mb-1">
+        <h2 className="font-semibold">ตรวจข้อมูล</h2>
+        <span className="text-xs font-semibold px-2.5 py-1 rounded-full" style={{ background: "#FEF3C7", color: "#92400E" }}>{issues.length} รายการ</span>
+      </div>
+      <p className="text-xs mb-3" style={{ color: C.muted }}>รายการที่อาจซ้ำหรืออ่านผิด แตะเพื่อเปิดดู/แก้ไข</p>
+      {shown.map((it, i) => (
+        <button key={i} onClick={() => onOpen(it.e)} className="w-full text-left py-2.5 min-h-[44px]" style={{ borderTop: `1px solid ${C.line}` }}>
+          <div className="text-sm font-semibold truncate">{fmtShort(it.e.date)} · {it.e.station || it.e.provider || "สถานี"} · {baht(it.e.amount)}</div>
+          <div className="text-xs" style={{ color: "#92400E" }}>{it.why}</div>
+        </button>
+      ))}
+      {issues.length > 3 && (
+        <button onClick={() => setOpen((v) => !v)} className="w-full pt-2 text-sm font-semibold min-h-[44px]" style={{ color: C.accent }}>{open ? "ย่อรายการ" : `ดูทั้งหมด (${issues.length})`}</button>
+      )}
+    </div>
+  );
+}
+
 /* ---------------- ยอดตามช่วงเวลา: สัปดาห์ / เดือน(รอบ) / ปี ---------------- */
 function SpendCard({ entries, startDay }) {
   const [mode, setMode] = useState("week");
@@ -658,7 +720,7 @@ function SpendCard({ entries, startDay }) {
   return (
     <div className="rounded-3xl bg-white p-6 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
       <h2 className="font-semibold mb-3">ค่าใช้จ่ายตามช่วงเวลา</h2>
-      <div className="flex gap-1 p-1 rounded-2xl mb-4" style={{ background: "#EDEBE8" }}>
+      <div className="flex gap-1 p-1 rounded-2xl mb-4" style={{ background: "#E8F1F6" }}>
         {tabs.map(([k, l]) => (
           <button key={k} onClick={() => setMode(k)} className="flex-1 py-2 rounded-xl text-sm font-semibold transition" style={{ background: mode === k ? "#fff" : "transparent", color: mode === k ? C.ink : C.muted }}>{l}</button>
         ))}
@@ -670,8 +732,8 @@ function SpendCard({ entries, startDay }) {
               <span style={{ fontWeight: i === 0 ? 700 : 500 }}>{b.label}{i === 0 ? " (ล่าสุด)" : ""}</span>
               <span className="font-bold">{baht(b.amount)}</span>
             </div>
-            <div className="h-2 rounded-full mt-1" style={{ background: "#EDEBE8" }}>
-              <div className="h-2 rounded-full" style={{ width: `${(b.amount / max) * 100}%`, background: i === 0 ? C.accent : "#CDBFA9" }} />
+            <div className="h-2 rounded-full mt-1" style={{ background: "#E8F1F6" }}>
+              <div className="h-2 rounded-full" style={{ width: `${(b.amount / max) * 100}%`, background: i === 0 ? C.accent : "#A5D4E0" }} />
             </div>
             <p className="text-[11px] mt-0.5" style={{ color: C.muted }}>{b.count} ครั้ง · {num(b.kwh)} kWh{b.avg ? ` · เฉลี่ย ${num(b.avg)} ฿/kWh` : ""}</p>
           </div>
@@ -917,7 +979,7 @@ function TrendCard({ data }) {
           return (
             <div key={i} className="flex-1 flex flex-col items-center justify-end h-full">
               <span className="text-[10px] mb-1" style={{ color: d.active ? C.ink : C.muted, fontWeight: d.active ? 700 : 400 }}>{d.total ? compact(d.total) : ""}</span>
-              <div className="w-full rounded-lg overflow-hidden flex flex-col justify-end" style={{ height: Math.max(h, d.total ? 4 : 2), background: d.total ? "transparent" : "#EDEBE8", opacity: d.active ? 1 : 0.7 }}>
+              <div className="w-full rounded-lg overflow-hidden flex flex-col justify-end" style={{ height: Math.max(h, d.total ? 4 : 2), background: d.total ? "transparent" : "#E8F1F6", opacity: d.active ? 1 : 0.7 }}>
                 <div style={{ height: h - hHome, background: C.ink }} />
                 <div style={{ height: hHome, background: C.accent }} />
               </div>
@@ -948,7 +1010,7 @@ function PriceCompare({ entries, homeRate }) {
     <div className="rounded-3xl bg-white p-6 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
       <div className="flex items-center justify-between mb-4">
         <h2 className="font-semibold">เทียบราคาต่อ kWh</h2>
-        <div className="flex gap-1 p-1 rounded-xl" style={{ background: "#EDEBE8" }}>
+        <div className="flex gap-1 p-1 rounded-xl" style={{ background: "#E8F1F6" }}>
           {[["provider", "ตามค่าย"], ["station", "ตามสถานี"]].map(([v, l]) => (
             <button key={v} onClick={() => setMode(v)} className="px-3 py-1 rounded-lg text-xs font-semibold" style={{ background: mode === v ? "#fff" : "transparent", color: mode === v ? C.accent : C.muted }}>{l}</button>
           ))}
@@ -961,11 +1023,11 @@ function PriceCompare({ entries, homeRate }) {
             <div className="flex justify-between text-sm mb-1 gap-2">
               <span className="truncate">
                 {r.name}
-                {i === 0 && rows.length > 1 && <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-md" style={{ background: "#EDF3EF", color: C.green }}>ถูกสุด</span>}
+                {i === 0 && rows.length > 1 && <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-md" style={{ background: "#E6F4EE", color: C.green }}>ถูกสุด</span>}
               </span>
               <span className="font-semibold shrink-0">{num(r.rate)} <span className="font-normal text-xs" style={{ color: C.muted }}>฿/kWh · {r.count} ครั้ง</span></span>
             </div>
-            <div className="h-2 rounded-full overflow-hidden" style={{ background: "#F0EEEB" }}>
+            <div className="h-2 rounded-full overflow-hidden" style={{ background: "#EDF4F7" }}>
               <div className="h-full rounded-full" style={{ width: `${(r.rate / max) * 100}%`, background: i === 0 ? C.green : C.accent }} />
             </div>
           </div>
@@ -1033,7 +1095,7 @@ function CompanyCard({ monthly, period, onToggle, onExport, onOpen }) {
           <p className="text-xs" style={{ color: C.accent }}>รอเบิก</p>
           <p className="font-bold">{baht(monthly.companyPending)}</p>
         </div>
-        <div className="rounded-2xl px-4 py-3" style={{ background: "#EDF3EF" }}>
+        <div className="rounded-2xl px-4 py-3" style={{ background: "#E6F4EE" }}>
           <p className="text-xs" style={{ color: C.green }}>เบิกแล้ว</p>
           <p className="font-bold">{baht(monthly.companyPaid)}</p>
         </div>
@@ -1059,7 +1121,7 @@ function CompanyCard({ monthly, period, onToggle, onExport, onOpen }) {
 
 function Stat({ label, value, unit, big }) {
   return (
-    <div className="rounded-2xl p-4" style={{ background: "#F7F6F4" }}>
+    <div className="rounded-2xl p-4" style={{ background: "#F4FAFB" }}>
       <p className="text-xs mb-1" style={{ color: C.muted }}>{label}</p>
       <p className={big ? "text-2xl font-bold" : "text-xl font-bold"}>{value}</p>
       <p className="text-xs" style={{ color: C.muted }}>{unit}</p>
@@ -1097,15 +1159,15 @@ function JobsTab({ stats, onOpen, onNew }) {
               <ChevronRight size={18} color={C.muted} className="shrink-0" />
             </div>
             <div className="grid grid-cols-3 gap-2 mt-3 text-center">
-              <div className="rounded-xl py-2" style={{ background: "#F7F6F4" }}>
+              <div className="rounded-xl py-2" style={{ background: "#F4FAFB" }}>
                 <p className="text-[10px]" style={{ color: C.muted }}>ค่าชาร์จ</p>
                 <p className="text-sm font-bold">{baht(s.amount)}</p>
               </div>
-              <div className="rounded-xl py-2" style={{ background: "#F7F6F4" }}>
+              <div className="rounded-xl py-2" style={{ background: "#F4FAFB" }}>
                 <p className="text-[10px]" style={{ color: C.muted }}>ระยะไป-กลับ</p>
                 <p className="text-sm font-bold">{s.km > 0 ? `${num(s.km, 0)} กม.` : "-"}</p>
               </div>
-              <div className="rounded-xl py-2" style={{ background: "#F7F6F4" }}>
+              <div className="rounded-xl py-2" style={{ background: "#F4FAFB" }}>
                 <p className="text-[10px]" style={{ color: C.muted }}>฿/กม.</p>
                 <p className="text-sm font-bold">{s.perKm > 0 ? num(s.perKm) : "-"}</p>
               </div>
@@ -1198,7 +1260,7 @@ function JobSheet({ isNew, stat, entries, billKm, onClose, onSave, onDelete }) {
       )}
 
       {stat && stat.count === 0 && (
-        <button onClick={remove} disabled={busy} className="w-full mt-4 py-3 rounded-2xl font-semibold text-sm" style={{ background: "#F7ECE9", color: C.red }}>ลบงานนี้</button>
+        <button onClick={remove} disabled={busy} className="w-full mt-4 py-3 rounded-2xl font-semibold text-sm" style={{ background: "#FDECEC", color: C.red }}>ลบงานนี้</button>
       )}
     </Sheet>
   );
@@ -1279,7 +1341,7 @@ function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
       if (pendingFile) uploadReceipt(userId, pendingFile);
     } catch (e) {
       savedRef.current = false;
-      setErr("บันทึกไม่สำเร็จ ลองใหม่อีกครั้ง");
+      setErr(String(e?.message || "").startsWith("ยกเลิก") ? "ยกเลิกการบันทึกแล้ว (อาจซ้ำกับรายการเดิม)" : "บันทึกไม่สำเร็จ ลองใหม่อีกครั้ง");
     } finally {
       setSaving(false);
     }
@@ -1287,7 +1349,7 @@ function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
 
   return (
     <Sheet title="บันทึกค่าไฟ" onClose={onClose}>
-      <div className="grid grid-cols-2 gap-1 p-1 rounded-2xl mb-5" style={{ background: "#EDEBE8" }}>
+      <div className="grid grid-cols-2 gap-1 p-1 rounded-2xl mb-5" style={{ background: "#E8F1F6" }}>
         {[["station", "สถานี", <Zap size={16} key="z" />], ["home", "บ้าน", <Home size={16} key="h" />]].map(([v, l, ic]) => (
           <button key={v} onClick={() => set("place", v)} className="py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-1.5 transition" style={{ background: f.place === v ? "#fff" : "transparent", color: f.place === v ? C.accent : C.muted }}>
             {ic}{l}
@@ -1383,7 +1445,7 @@ function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
       </Field>
 
       {rate > 0 && (
-        <div className="rounded-2xl p-4 mb-4 text-sm" style={{ background: "#F7F6F4" }}>
+        <div className="rounded-2xl p-4 mb-4 text-sm" style={{ background: "#F4FAFB" }}>
           ครั้งนี้ <b>{num(rate)} ฿/kWh</b>
           {avgRate > 0 && (
             <span style={{ color: rate < avgRate ? C.green : C.red }}> · {rate < avgRate ? "ถูกกว่า" : "แพงกว่า"}ค่าเฉลี่ย {num(Math.abs(rate - avgRate))} ฿</span>
@@ -1492,7 +1554,7 @@ function DetailSheet({ e, billKm, avgRate, onClose, onDelete, onSaveEdit, onTogg
 
         {err && <p className="text-sm mb-3" style={{ color: C.red }}>{err}</p>}
         <div className="flex gap-2">
-          <button onClick={() => setEditing(false)} className="flex-1 py-3.5 rounded-2xl font-semibold" style={{ background: "#F0EEEB", color: C.ink }}>ยกเลิก</button>
+          <button onClick={() => setEditing(false)} className="flex-1 py-3.5 rounded-2xl font-semibold" style={{ background: "#EDF4F7", color: C.ink }}>ยกเลิก</button>
           <button onClick={saveEdit} disabled={busy} className="flex-1 py-3.5 rounded-2xl text-white font-bold flex items-center justify-center gap-2" style={{ background: C.accent }}>
             {busy ? <Loader2 size={18} className="animate-spin" /> : "บันทึกการแก้ไข"}
           </button>
@@ -1510,7 +1572,7 @@ function DetailSheet({ e, billKm, avgRate, onClose, onDelete, onSaveEdit, onTogg
         <Stat label="ราคาต่อหน่วย" value={num(rate)} unit="฿/kWh" />
       </div>
       {avgRate > 0 && (
-        <div className="rounded-2xl p-4 mb-4 text-sm" style={{ background: rate < avgRate ? "#EDF3EF" : "#F7ECE9" }}>
+        <div className="rounded-2xl p-4 mb-4 text-sm" style={{ background: rate < avgRate ? "#E6F4EE" : "#FDECEC" }}>
           เทียบค่าเฉลี่ยของคุณ ({num(avgRate)} ฿/kWh) ครั้งนี้
           <b style={{ color: rate < avgRate ? C.green : C.red }}> {rate < avgRate ? "ประหยัดกว่า" : "แพงกว่า"} {num(Math.abs(rate - avgRate) * e.kwh)} บาท</b>
         </div>
@@ -1527,7 +1589,7 @@ function DetailSheet({ e, billKm, avgRate, onClose, onDelete, onSaveEdit, onTogg
       </div>
 
       {e.category === "company" && (
-        <button onClick={() => onToggleReimburse(e)} className="w-full mb-3 py-3.5 rounded-2xl font-semibold flex items-center justify-center gap-2" style={{ background: e.reimbursed ? "#EDF3EF" : C.accentSoft, color: e.reimbursed ? C.green : C.accent }}>
+        <button onClick={() => onToggleReimburse(e)} className="w-full mb-3 py-3.5 rounded-2xl font-semibold flex items-center justify-center gap-2" style={{ background: e.reimbursed ? "#E6F4EE" : C.accentSoft, color: e.reimbursed ? C.green : C.accent }}>
           {e.reimbursed ? <CheckCircle2 size={18} /> : <Circle size={18} />}
           {e.reimbursed ? "เบิกแล้ว (แตะเพื่อยกเลิก)" : "ทำเครื่องหมายว่าเบิกแล้ว"}
         </button>
@@ -1537,7 +1599,7 @@ function DetailSheet({ e, billKm, avgRate, onClose, onDelete, onSaveEdit, onTogg
         <button onClick={() => setEditing(true)} className="flex-1 py-3.5 rounded-2xl font-semibold flex items-center justify-center gap-2" style={{ background: C.accentSoft, color: C.accent }}>
           <Pencil size={16} /> แก้ไข
         </button>
-        <button onClick={async () => { setBusy(true); await onDelete(e.id); }} disabled={busy} className="flex-1 py-3.5 rounded-2xl font-semibold flex items-center justify-center gap-2" style={{ background: "#F7ECE9", color: C.red }}>
+        <button onClick={async () => { setBusy(true); await onDelete(e.id); }} disabled={busy} className="flex-1 py-3.5 rounded-2xl font-semibold flex items-center justify-center gap-2" style={{ background: "#FDECEC", color: C.red }}>
           {busy ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />} ลบ
         </button>
       </div>
@@ -1572,7 +1634,7 @@ function Sheet({ title, children, onClose }) {
       <div className="w-full max-w-md rounded-t-3xl max-h-[92vh] overflow-y-auto p-6 pb-10" style={{ background: C.bg }} onClick={(ev) => ev.stopPropagation()}>
         <div className="flex items-center justify-between mb-5 sticky top-0 pt-1 pb-3" style={{ background: C.bg }}>
           <h2 className="text-2xl font-bold">{title}</h2>
-          <button onClick={onClose} className="w-10 h-10 rounded-full flex items-center justify-center" style={{ background: "#E6E4E1" }}><X size={18} /></button>
+          <button onClick={onClose} className="w-10 h-10 rounded-full flex items-center justify-center" style={{ background: "#DCE9EE" }}><X size={18} /></button>
         </div>
         {children}
       </div>

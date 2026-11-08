@@ -7,7 +7,8 @@ html, body, #root {
 }
 
 body {
-  font-family: "Sarabun", system-ui, sans-serif;
+  font-family: "Inter", "Noto Sans Thai", system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
   -webkit-tap-highlight-color: transparent;
   overscroll-behavior-y: contain;
 }
@@ -15,7 +16,7 @@ body {
 input[type="range"] {
   -webkit-appearance: none;
   height: 4px;
-  background: #E5E2DE;
+  background: #CFE8EE;
   border-radius: 999px;
 }
 input[type="range"]::-webkit-slider-thumb {

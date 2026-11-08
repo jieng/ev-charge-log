@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { Zap, Loader2, Mail, Lock, CheckCircle2 } from "lucide-react";
 import { signUpWithPassword, signInWithPassword } from "../lib/api";
 
-const C = { accent: "#A98C67", accentSoft: "#EFE7DB", ink: "#3A322A", bg: "#F2F1EF", muted: "#8A8279", line: "#E5E2DE" };
+const C = { accent: "#0E7490", accentSoft: "#DCEFF3", ink: "#164E63", bg: "#F4FAFB", muted: "#475569", line: "#CFE8EE" };
 const inputCls = "w-full px-4 py-3.5 rounded-2xl bg-white outline-none text-base";
 
 export default function Login() {

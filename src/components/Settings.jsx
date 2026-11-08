@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import { X, LogOut, Link2, Loader2, CheckCircle2 } from "lucide-react";
 import { updateVehicle, signOut, createLinkCode, getLineLinks, unlinkLine } from "../lib/api";
 
-const C = { accent: "#A98C67", accentSoft: "#EFE7DB", ink: "#3A322A", bg: "#F2F1EF", muted: "#8A8279", line: "#E5E2DE", red: "#B4634F" };
+const C = { accent: "#0E7490", accentSoft: "#DCEFF3", ink: "#164E63", bg: "#F4FAFB", muted: "#475569", line: "#CFE8EE", red: "#B91C1C" };
 const inputCls = "w-full px-4 py-3.5 rounded-2xl bg-white outline-none text-base";
 const TH = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."];
 
@@ -69,7 +69,7 @@ export default function Settings({ vehicle, onClose, onSaved, userEmail, userId 
       <div className="w-full max-w-md rounded-t-3xl max-h-[92vh] overflow-y-auto p-6 pb-10" style={{ background: C.bg }} onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-6">
           <h2 className="text-2xl font-bold">ตั้งค่า</h2>
-          <button onClick={onClose} className="w-10 h-10 rounded-full flex items-center justify-center" style={{ background: "#E6E4E1" }}>
+          <button onClick={onClose} className="w-10 h-10 rounded-full flex items-center justify-center" style={{ background: "#DCE9EE" }}>
             <X size={18} />
           </button>
         </div>
@@ -115,8 +115,8 @@ export default function Settings({ vehicle, onClose, onSaved, userEmail, userId 
           </p>
 
           {links.length > 0 && links.map((l) => (
-            <div key={l.line_user_id} className="flex items-center justify-between rounded-2xl px-4 py-3 mb-2" style={{ background: "#EDF3EF" }}>
-              <span className="flex items-center gap-2 text-sm"><CheckCircle2 size={16} color="#5B8C6E" /> ผูกแล้ว</span>
+            <div key={l.line_user_id} className="flex items-center justify-between rounded-2xl px-4 py-3 mb-2" style={{ background: "#E6F4EE" }}>
+              <span className="flex items-center gap-2 text-sm"><CheckCircle2 size={16} color="#15803D" /> ผูกแล้ว</span>
               <button onClick={() => unlink(l.line_user_id)} className="text-xs font-semibold" style={{ color: C.red }}>ยกเลิกการผูก</button>
             </div>
           ))}
