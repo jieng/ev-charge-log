@@ -1,4 +1,5 @@
 import { supabase } from "./supabaseClient";
+import { prepareReceiptImage } from "./image";
 
 /* ---------- Auth ---------- */
 
@@ -169,16 +170,11 @@ export async function uploadReceipt(userId, file) {
 }
 
 export async function readReceiptOCR(file) {
-  const base64 = await new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onload = () => resolve(r.result.split(",")[1]);
-    r.onerror = () => reject(new Error("อ่านไฟล์รูปไม่สำเร็จ"));
-    r.readAsDataURL(file);
-  });
-
-  const { data, error } = await supabase.functions.invoke("read-receipt", {
-    body: { image: base64, mediaType: file.type || "image/jpeg" },
-  });
+  const { base64, mediaType } = await prepareReceiptImage(file);
+  const call = supabase.functions.invoke("read-receipt", { body: { image: base64, mediaType } });
+  // ไม่รอเกิน 50 วินาที เพื่อไม่ให้หน้าจอค้างเมื่อบริการ OCR ช้า
+  const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error("อ่านใบเสร็จนานเกินไป")), 50000));
+  const { data, error } = await Promise.race([call, timeout]);
   if (error) throw error;
   if (data?.error) throw new Error(data.error);
   return data;
