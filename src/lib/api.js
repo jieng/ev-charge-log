@@ -183,3 +183,32 @@ export async function readReceiptOCR(file) {
   if (data?.error) throw new Error(data.error);
   return data;
 }
+
+/* ---------- เที่ยวของงาน (Job legs) ---------- */
+
+export async function listLegs(userId) {
+  const { data, error } = await supabase
+    .from("job_legs")
+    .select("*")
+    .eq("user_id", userId)
+    .order("start_date", { ascending: true });
+  if (error) throw error;
+  return data;
+}
+
+// แทนที่เที่ยวทั้งหมดของงานนี้; ส่ง [] = กลับไปใช้การแบ่งอัตโนมัติ
+export async function replaceLegs(userId, code, legs) {
+  const { error: delErr } = await supabase.from("job_legs").delete().eq("user_id", userId).eq("job_code", code);
+  if (delErr) throw delErr;
+  if (!legs.length) return;
+  const rows = legs.map((l) => ({
+    user_id: userId,
+    job_code: code,
+    start_date: l.start_date,
+    end_date: l.end_date,
+    start_odo: l.start_odo || null,
+    end_odo: l.end_odo || null,
+  }));
+  const { error } = await supabase.from("job_legs").insert(rows);
+  if (error) throw error;
+}

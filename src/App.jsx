@@ -7,21 +7,14 @@ import {
 } from "lucide-react";
 import {
   getSession, onAuthChange, getOrCreateVehicle, listCharges, addCharge, deleteCharge,
-  updateCharge, uploadReceipt, readReceiptOCR, listJobs, upsertJob, ensureJob, deleteJob,
+  updateCharge, uploadReceipt, readReceiptOCR, listJobs, upsertJob, ensureJob, deleteJob, listLegs, replaceLegs,
 } from "./lib/api";
 import Login from "./components/Login";
 import SettingsSheet from "./components/Settings";
-
-const C = {
-  accent: "#0E7490", accentSoft: "#DCEFF3", ink: "#164E63",
-  bg: "#F4FAFB", line: "#CFE8EE", muted: "#475569", green: "#15803D", red: "#B91C1C",
-};
-
-const PROVIDERS = [
-  "EV Station PluZ", "PEA VOLTA", "EGAT EleXa", "MEA EV", "Spark EV",
-  "iGreen+", "EVolt", "OneCharge", "Altervim", "Tesla",
-  "Reversharger", "Shell Recharge", "Susco EV", "อื่นๆ / Other",
-];
+import { mergeProviders, uniqueStations } from "./lib/providers";
+import { C } from "./lib/theme";
+import { normTime, toChargedAt } from "./lib/datetime";
+import { applySavedLegs, seedTripOdo, jobRollup } from "./lib/legs";
 
 const THMONTH = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"];
 const TH_SHORT = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."];
@@ -175,6 +168,7 @@ export default function App() {
   const [vehicle, setVehicle] = useState(null);
   const [entries, setEntries] = useState([]);
   const [jobs, setJobs] = useState([]);
+  const [legsSaved, setLegsSaved] = useState([]);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("log");
   const [sheet, setSheet] = useState(false);
@@ -194,10 +188,11 @@ export default function App() {
   const loadData = useCallback(async (userId) => {
     setLoading(true); setLoadErr("");
     try {
-      const [v, c, j] = await Promise.all([getOrCreateVehicle(userId), listCharges(userId), listJobs(userId)]);
+      const [v, c, j, lg] = await Promise.all([getOrCreateVehicle(userId), listCharges(userId), listJobs(userId), listLegs(userId)]);
       setVehicle(v);
       setEntries(c.map(fromRow));
       setJobs(j);
+      setLegsSaved(lg);
     } catch (e) {
       setLoadErr("โหลดข้อมูลไม่สำเร็จ ลองรีเฟรชหน้าใหม่");
     } finally {
@@ -263,60 +258,54 @@ export default function App() {
     return out;
   }, [entries, startDay, periodOffset]);
 
+  const stationNames = useMemo(() => uniqueStations(entries), [entries]);
+  const providerNames = useMemo(() => [...new Set(entries.map((e) => e.provider).filter(Boolean))], [entries]);
+  const listsValue = useMemo(() => ({ providers: providerNames, stations: stationNames }), [providerNames, stationNames]);
+
   const jobStats = useMemo(() => {
-    const map = new Map();
-    const get = (code) => {
-      if (!map.has(code)) map.set(code, { code, title: "", roundTripKm: 0, startOdo: 0, endOdo: 0, count: 0, amount: 0, kwh: 0, odos: [], odoRows: [], rows: [] });
-      return map.get(code);
-    };
-    jobs.forEach((j) => {
-      const s = get(j.code);
-      s.title = j.title || "";
-      s.roundTripKm = Number(j.round_trip_km) || 0;
-      s.startOdo = Number(j.start_odo) || 0;
-      s.endOdo = Number(j.end_odo) || 0;
-    });
+    const meta = new Map();
+    jobs.forEach((j) => meta.set(j.code, {
+      title: j.title || "", roundTripKm: Number(j.round_trip_km) || 0,
+      startOdo: Number(j.start_odo) || 0, endOdo: Number(j.end_odo) || 0,
+    }));
+    const rowsBy = new Map();
     entries.forEach((e) => {
       if (!e.job) return;
-      const s = get(e.job);
-      s.count += 1; s.amount += e.amount; s.kwh += e.kwh;
-      s.rows.push(e);
-      if (e.odo > 0) { s.odos.push(e.odo); s.odoRows.push(e); }
+      if (!rowsBy.has(e.job)) rowsBy.set(e.job, []);
+      rowsBy.get(e.job).push(e);
     });
-    return [...map.values()].map((s) => {
-      const bothTrip = s.startOdo > 0 && s.endOdo > s.startOdo;
-      const pts = [...s.odos, ...(s.startOdo > 0 ? [s.startOdo] : []), ...(s.endOdo > 0 ? [s.endOdo] : [])];
-      const kmAuto = bothTrip ? s.endOdo - s.startOdo : pts.length >= 2 ? Math.max(...pts) - Math.min(...pts) : 0;
-      const km = s.roundTripKm > 0 ? s.roundTripKm : kmAuto;
-      const tripOdo = s.startOdo > 0 || s.endOdo > 0;
-      const kmSource = s.roundTripKm > 0 ? "manual" : kmAuto > 0 ? (tripOdo ? "trip" : "odo") : "none";
-      // บิลที่ใช้คิด ฿/กม.: ถ้ากรอกระยะเอง หรือมีไมล์ออกเดินทางต่ำกว่าบิลแรก ใช้ทุกบิลของงาน;
-      // นอกนั้นตัดบิลที่ไมล์ต่ำสุด (ชาร์จก่อนเริ่มวิ่ง) แต่นับบิลที่ไม่มีเลขไมล์ซึ่งอยู่หลังจากนั้น
-      const minOdo = s.odos.length ? Math.min(...s.odos) : 0;
-      const firstBill = s.odoRows.find((e) => e.odo === minOdo);
-      const allBills = kmSource === "manual" || kmSource === "none" || bothTrip || (s.startOdo > 0 && s.startOdo <= minOdo);
-      const used = allBills ? s.rows : s.rows.filter((e) => firstBill && e.date > firstBill.date);
-      const amtForKm = used.reduce((a, e) => a + e.amount, 0);
-      const kwhForKm = used.reduce((a, e) => a + e.kwh, 0);
+    const codes = new Set([...meta.keys(), ...rowsBy.keys()]);
+    return [...codes].map((code) => {
+      const m = meta.get(code) || { title: "", roundTripKm: 0, startOdo: 0, endOdo: 0 };
+      const rows = rowsBy.get(code) || [];
+      const saved = legsSaved.filter((l) => l.job_code === code);
+      // เที่ยว: ที่ผู้ใช้บันทึกไว้ ไม่งั้นแบ่งอัตโนมัติ (ไมล์เริ่ม/จบระดับงานเดิมใช้กับเที่ยวที่บิลตกในช่วงนั้น)
+      const legs = saved.length ? applySavedLegs(rows, saved) : seedTripOdo(applySavedLegs(rows, []), m.startOdo, m.endOdo);
+      const rollup = jobRollup(legs, m.roundTripKm);
+      const t = rollup.total;
+      const kmSource = rollup.legs.length === 1 ? rollup.legs[0].kmSource : t.km > 0 ? "legs" : "none";
       return {
-        ...s, km, kmSource,
-        perKm: km > 0 ? amtForKm / km : 0,
-        kwhPer100: km > 0 ? (kwhForKm / km) * 100 : 0,
-        perCharge: s.count ? s.amount / s.count : 0,
+        code, ...m, rows, legs, rollup, hasSavedLegs: saved.length > 0,
+        count: t.count, amount: t.amount, kwh: t.kwh, km: t.km, kmSource,
+        perKm: t.perKm, kwhPer100: t.kwhPer100,
+        perCharge: t.count ? t.amount / t.count : 0,
       };
     }).sort((a, b) => b.count - a.count || a.code.localeCompare(b.code));
-  }, [jobs, entries]);
+  }, [jobs, entries, legsSaved]);
 
   // ต่อบิล: ระยะจากการชาร์จครั้งก่อน (เรียงตามเวลา) และ ฿/กม. ของบิลนั้น; ถ้างานมีไมล์เริ่ม บิลแรกของงานใช้ไมล์เริ่มเป็นจุดเริ่ม
   const billKm = useMemo(() => {
     const m = new Map();
-    const startOf = new Map(jobStats.filter((s) => s.startOdo > 0).map((s) => [s.code, s.startOdo]));
+    // บิลแรก (ที่มีเลขไมล์) ของแต่ละเที่ยวใช้ไมล์ออกเดินทางของเที่ยวนั้นเป็นจุดเริ่ม
+    const startFor = new Map();
+    jobStats.forEach((s) => s.legs.forEach((l) => {
+      const first = l.rows.find((e) => e.odo > 0);
+      if (l.startOdo > 0 && first) startFor.set(first.id, l.startOdo);
+    }));
     const seq = entries.filter((e) => e.odo > 0).sort((a, b) => (a.date < b.date ? -1 : 1));
-    const firstSeen = new Set();
     seq.forEach((e, i) => {
       let prev = i > 0 ? seq[i - 1].odo : 0;
-      if (e.job && startOf.has(e.job) && !firstSeen.has(e.job)) { prev = startOf.get(e.job); }
-      if (e.job) firstSeen.add(e.job);
+      if (startFor.has(e.id)) prev = startFor.get(e.id);
       const km = e.odo - prev;
       const kwh100 = km > 0 ? (e.kwh / km) * 100 : 0;
       // ชาร์จบางส่วน/ไมล์ข้ามช่วง ทำให้ตัวเลขต่อบิลเพี้ยน: แสดงเฉพาะค่าที่สมเหตุสมผล (8–35 kWh/100 กม.)
@@ -386,15 +375,22 @@ export default function App() {
     setJobs((p) => [row, ...p.filter((j) => j.code !== row.code)]);
   };
 
+  const handleSaveLegs = async (code, legs) => {
+    await replaceLegs(session.user.id, code, legs);
+    setLegsSaved(await listLegs(session.user.id));
+  };
+
   const handleDeleteJob = async (code) => {
     await deleteJob(session.user.id, code);
+    await replaceLegs(session.user.id, code, []);
     setJobs((p) => p.filter((j) => j.code !== code));
+    setLegsSaved((p) => p.filter((l) => l.job_code !== code));
   };
 
   if (session === undefined || (session && loading && !vehicle)) {
     return (
       <div className="min-h-screen flex items-center justify-center" style={{ background: C.bg }}>
-        <Loader2 size={28} className="animate-spin" color={C.accent} />
+        <Loader2 size={28} className="animate-spin" color={C.accentText} />
       </div>
     );
   }
@@ -403,7 +399,11 @@ export default function App() {
   const activeJobStat = jobSheet && jobSheet !== "new" ? jobStats.find((s) => s.code === jobSheet) : null;
 
   return (
+    <ListsCtx.Provider value={listsValue}>
     <div className="min-h-screen w-full pb-32" style={{ background: C.bg, color: C.ink }}>
+      <datalist id="stations-list">
+        {stationNames.map((n) => <option key={n} value={n} />)}
+      </datalist>
       <datalist id="jobs-list">
         {jobStats.map((s) => <option key={s.code} value={s.code}>{s.title}</option>)}
       </datalist>
@@ -415,16 +415,16 @@ export default function App() {
             <p className="text-sm mt-1" style={{ color: C.muted }}>{vehicle?.name} · แบต {vehicle?.battery_kwh} kWh</p>
           </div>
           <div className="flex gap-2">
-            <button onClick={() => setSettingsOpen(true)} className="w-12 h-12 rounded-2xl flex items-center justify-center shadow-sm active:scale-95 transition bg-white" style={{ border: `1px solid ${C.line}` }} aria-label="ตั้งค่า">
+            <button onClick={() => setSettingsOpen(true)} className="w-12 h-12 rounded-2xl flex items-center justify-center shadow-sm active:scale-95 transition bg-[var(--card)]" style={{ border: `1px solid ${C.line}` }} aria-label="ตั้งค่า">
               <SettingsIcon size={20} color={C.ink} />
             </button>
-            <button onClick={() => setSheet(true)} className="w-12 h-12 rounded-2xl flex items-center justify-center shadow-sm active:scale-95 transition" style={{ background: C.ink }} aria-label="เพิ่มรายการ">
+            <button onClick={() => setSheet(true)} className="w-12 h-12 rounded-2xl flex items-center justify-center shadow-sm active:scale-95 transition" style={{ background: C.strong }} aria-label="เพิ่มรายการ">
               <Plus size={22} color="#fff" />
             </button>
           </div>
         </header>
 
-        {loadErr && <p className="text-sm mb-4 p-3 rounded-2xl" style={{ background: "#FDECEC", color: C.red }}>{loadErr}</p>}
+        {loadErr && <p className="text-sm mb-4 p-3 rounded-2xl" style={{ background: "var(--red-soft)", color: C.red }}>{loadErr}</p>}
 
         {tab === "log" && (
           <>
@@ -433,7 +433,7 @@ export default function App() {
               <h2 className="text-sm font-semibold" style={{ color: C.muted }}>
                 {showAll ? `ทุกรายการ · ${sorted.length} ครั้ง` : `รอบนี้ · ${periodRows.length} ครั้ง`}
               </h2>
-              <button onClick={() => setShowAll((v) => !v)} className="text-xs font-semibold" style={{ color: C.accent }}>
+              <button onClick={() => setShowAll((v) => !v)} className="text-xs font-semibold" style={{ color: C.accentText }}>
                 {showAll ? "แสดงเฉพาะรอบนี้" : "แสดงทั้งหมด"}
               </button>
             </div>
@@ -468,7 +468,7 @@ export default function App() {
       <NavBar tab={tab} setTab={setTab} />
       {toast && (
         <div className="fixed left-0 right-0 flex justify-center z-[60]" style={{ bottom: 100 }}>
-          <div className="px-5 py-3 rounded-2xl text-white text-sm font-semibold shadow-lg" style={{ background: C.ink }}>
+          <div className="px-5 py-3 rounded-2xl text-white text-sm font-semibold shadow-lg" style={{ background: C.strong }}>
             {toast}
           </div>
         </div>
@@ -497,6 +497,7 @@ export default function App() {
           billKm={billKm}
           onClose={() => setJobSheet(null)}
           onSave={handleSaveJob}
+          onSaveLegs={handleSaveLegs}
           onDelete={handleDeleteJob}
         />
       )}
@@ -516,13 +517,14 @@ export default function App() {
         />
       )}
     </div>
+    </ListsCtx.Provider>
   );
 }
 
 /* ---------------- Summary ---------------- */
 function SummaryCard({ monthly, yearly, period, shiftPeriod, canNext }) {
   return (
-    <div className="rounded-3xl bg-white p-6 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
+    <div className="rounded-3xl bg-[var(--card)] p-6 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
       <div className="flex items-center justify-between mb-4">
         <button onClick={() => shiftPeriod(-1)} className="w-9 h-9 rounded-xl flex items-center justify-center" style={{ background: C.accentSoft }}>‹</button>
         <span className="font-semibold text-center text-sm">{period.label}</span>
@@ -542,7 +544,7 @@ function SummaryCard({ monthly, yearly, period, shiftPeriod, canNext }) {
         <Pill icon={<Briefcase size={14} />} label="บริษัท" value={baht(monthly.company)} highlight />
       </div>
       {monthly.companyPending > 0 && (
-        <p className="text-xs mt-3 text-center" style={{ color: C.accent }}>รอเบิกบริษัท {baht(monthly.companyPending)}</p>
+        <p className="text-xs mt-3 text-center" style={{ color: C.accentText }}>รอเบิกบริษัท {baht(monthly.companyPending)}</p>
       )}
       <div className="mt-4 pt-4 text-xs flex justify-between" style={{ borderTop: `1px solid ${C.line}`, color: C.muted }}>
         <span>รวมปี {yearly.year + 543}</span>
@@ -554,7 +556,7 @@ function SummaryCard({ monthly, yearly, period, shiftPeriod, canNext }) {
 
 function Pill({ icon, label, value, highlight }) {
   return (
-    <div className="rounded-2xl px-4 py-3" style={{ background: highlight ? C.accentSoft : "#F4FAFB" }}>
+    <div className="rounded-2xl px-4 py-3" style={{ background: highlight ? C.accentSoft : "var(--bg)" }}>
       <div className="flex items-center gap-1.5 text-xs mb-0.5" style={{ color: C.muted }}>{icon}{label}</div>
       <div className="font-semibold text-sm">{value}</div>
     </div>
@@ -567,22 +569,22 @@ function EntryCard({ e, avgRate, onClick }) {
   const diff = avgRate ? ((rate - avgRate) / avgRate) * 100 : 0;
   const cheaper = diff < 0;
   return (
-    <button onClick={onClick} className="w-full text-left rounded-3xl bg-white p-4 shadow-sm active:scale-[0.99] transition" style={{ border: `1px solid ${C.line}` }}>
+    <button onClick={onClick} className="w-full text-left rounded-3xl bg-[var(--card)] p-4 shadow-sm active:scale-[0.99] transition" style={{ border: `1px solid ${C.line}` }}>
       <div className="flex items-start gap-3">
-        <div className="w-11 h-11 rounded-2xl flex items-center justify-center shrink-0" style={{ background: e.place === "home" ? C.accentSoft : "#EDF4F7" }}>
-          {e.place === "home" ? <Home size={18} color={C.accent} /> : <Zap size={18} color={C.ink} />}
+        <div className="w-11 h-11 rounded-2xl flex items-center justify-center shrink-0" style={{ background: e.place === "home" ? C.accentSoft : "var(--line)" }}>
+          {e.place === "home" ? <Home size={18} color={C.accentText} /> : <Zap size={18} color={C.ink} />}
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <p className="font-semibold truncate">{e.place === "home" ? "ชาร์จที่บ้าน" : e.provider}</p>
-            <span className="text-[10px] px-1.5 py-0.5 rounded-md shrink-0" style={{ background: e.conn === "DC" ? C.ink : "#E8F1F6", color: e.conn === "DC" ? "#fff" : C.muted }}>{e.conn}</span>
+            <span className="text-[10px] px-1.5 py-0.5 rounded-md shrink-0" style={{ background: e.conn === "DC" ? C.strong : "var(--line)", color: e.conn === "DC" ? "#fff" : C.muted }}>{e.conn}</span>
             {e.category === "company" && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded-md shrink-0" style={{ background: e.reimbursed ? "#E6F4EE" : C.accentSoft, color: e.reimbursed ? C.green : C.accent }}>
+              <span className="text-[10px] px-1.5 py-0.5 rounded-md shrink-0" style={{ background: e.reimbursed ? "var(--green-soft)" : C.accentSoft, color: e.reimbursed ? C.green : C.accentText }}>
                 {e.reimbursed ? "บริษัท · เบิกแล้ว" : "บริษัท · รอเบิก"}
               </span>
             )}
             {e.job && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded-md shrink-0" style={{ background: "#E8F1F6", color: C.ink }}>งาน {e.job}</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded-md shrink-0" style={{ background: "var(--line)", color: C.ink }}>งาน {e.job}</span>
             )}
           </div>
           <p className="text-xs mt-0.5 truncate" style={{ color: C.muted }}>
@@ -610,7 +612,7 @@ function EntryCard({ e, avgRate, onClick }) {
 
 function EmptyState({ onAdd }) {
   return (
-    <div className="rounded-3xl bg-white p-8 text-center" style={{ border: `1px dashed ${C.line}` }}>
+    <div className="rounded-3xl bg-[var(--card)] p-8 text-center" style={{ border: `1px dashed ${C.line}` }}>
       <p className="font-semibold mb-1">ยังไม่มีรายการ</p>
       <p className="text-sm mb-4" style={{ color: C.muted }}>ถ่ายรูปใบเสร็จหรือกรอกเองเพื่อเริ่มบันทึก</p>
       <button onClick={onAdd} className="px-5 py-2.5 rounded-2xl text-white text-sm font-semibold" style={{ background: C.accent }}>เพิ่มรายการแรก</button>
@@ -622,7 +624,7 @@ function EmptyState({ onAdd }) {
 function StatsTab({ chart, lifetime, entries, vehicle, monthly, period, startDay, onReport, onToggleReimburse, onExport, onOpen }) {
   return (
     <div className="space-y-4">
-      <button onClick={onReport} className="w-full py-3.5 rounded-2xl text-white font-bold flex items-center justify-center gap-2 active:scale-[.99] transition" style={{ background: C.ink }}>
+      <button onClick={onReport} className="w-full py-3.5 rounded-2xl text-white font-bold flex items-center justify-center gap-2 active:scale-[.99] transition" style={{ background: C.strong }}>
         <Printer size={18} /> พิมพ์รายงานสรุป (เลือกหัวข้อได้)
       </button>
 
@@ -632,7 +634,7 @@ function StatsTab({ chart, lifetime, entries, vehicle, monthly, period, startDay
 
       <DataCheckCard entries={entries} onOpen={onOpen} />
 
-      <div className="rounded-3xl bg-white p-6 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
+      <div className="rounded-3xl bg-[var(--card)] p-6 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
         <h2 className="font-semibold mb-4">ค่าใช้งานเฉลี่ย</h2>
         <div className="grid grid-cols-2 gap-3">
           <Stat label="ค่าไฟเฉลี่ย" value={num(lifetime.avgRate)} unit="฿/kWh" big />
@@ -641,7 +643,7 @@ function StatsTab({ chart, lifetime, entries, vehicle, monthly, period, startDay
           <Stat label="ระยะทางสะสม" value={num(lifetime.km, 0)} unit="กม." />
         </div>
         {lifetime.km === 0 && (
-          <p className="text-xs mt-4 p-3 rounded-2xl" style={{ background: C.accentSoft, color: C.accent }}>
+          <p className="text-xs mt-4 p-3 rounded-2xl" style={{ background: C.accentSoft, color: C.accentText }}>
             กรอกเลขไมล์อย่างน้อย 2 ครั้ง เพื่อคำนวณ ฿/กม. และ kWh/100 กม.
           </p>
         )}
@@ -682,20 +684,20 @@ function DataCheckCard({ entries, onOpen }) {
   if (issues.length === 0) return null;
   const shown = open ? issues : issues.slice(0, 3);
   return (
-    <div className="rounded-3xl bg-white p-5 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
+    <div className="rounded-3xl bg-[var(--card)] p-5 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
       <div className="flex items-center justify-between mb-1">
         <h2 className="font-semibold">ตรวจข้อมูล</h2>
-        <span className="text-xs font-semibold px-2.5 py-1 rounded-full" style={{ background: "#FEF3C7", color: "#92400E" }}>{issues.length} รายการ</span>
+        <span className="text-xs font-semibold px-2.5 py-1 rounded-full" style={{ background: "var(--amber-soft)", color: "var(--amber-text)" }}>{issues.length} รายการ</span>
       </div>
       <p className="text-xs mb-3" style={{ color: C.muted }}>รายการที่อาจซ้ำหรืออ่านผิด แตะเพื่อเปิดดู/แก้ไข</p>
       {shown.map((it, i) => (
         <button key={i} onClick={() => onOpen(it.e)} className="w-full text-left py-2.5 min-h-[44px]" style={{ borderTop: `1px solid ${C.line}` }}>
           <div className="text-sm font-semibold truncate">{fmtShort(it.e.date)} · {it.e.station || it.e.provider || "สถานี"} · {baht(it.e.amount)}</div>
-          <div className="text-xs" style={{ color: "#92400E" }}>{it.why}</div>
+          <div className="text-xs" style={{ color: "var(--amber-text)" }}>{it.why}</div>
         </button>
       ))}
       {issues.length > 3 && (
-        <button onClick={() => setOpen((v) => !v)} className="w-full pt-2 text-sm font-semibold min-h-[44px]" style={{ color: C.accent }}>{open ? "ย่อรายการ" : `ดูทั้งหมด (${issues.length})`}</button>
+        <button onClick={() => setOpen((v) => !v)} className="w-full pt-2 text-sm font-semibold min-h-[44px]" style={{ color: C.accentText }}>{open ? "ย่อรายการ" : `ดูทั้งหมด (${issues.length})`}</button>
       )}
     </div>
   );
@@ -718,11 +720,11 @@ function SpendCard({ entries, startDay }) {
   const max = Math.max(1, ...buckets.map((b) => b.amount));
   const tabs = [["week", "รายสัปดาห์"], ["month", "รายเดือน"], ["year", "รายปี"]];
   return (
-    <div className="rounded-3xl bg-white p-6 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
+    <div className="rounded-3xl bg-[var(--card)] p-6 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
       <h2 className="font-semibold mb-3">ค่าใช้จ่ายตามช่วงเวลา</h2>
-      <div className="flex gap-1 p-1 rounded-2xl mb-4" style={{ background: "#E8F1F6" }}>
+      <div className="flex gap-1 p-1 rounded-2xl mb-4" style={{ background: "var(--line)" }}>
         {tabs.map(([k, l]) => (
-          <button key={k} onClick={() => setMode(k)} className="flex-1 py-2 rounded-xl text-sm font-semibold transition" style={{ background: mode === k ? "#fff" : "transparent", color: mode === k ? C.ink : C.muted }}>{l}</button>
+          <button key={k} onClick={() => setMode(k)} className="flex-1 py-2 rounded-xl text-sm font-semibold transition" style={{ background: mode === k ? "var(--card)" : "transparent", color: mode === k ? C.ink : C.muted }}>{l}</button>
         ))}
       </div>
       <div className="space-y-3">
@@ -732,8 +734,8 @@ function SpendCard({ entries, startDay }) {
               <span style={{ fontWeight: i === 0 ? 700 : 500 }}>{b.label}{i === 0 ? " (ล่าสุด)" : ""}</span>
               <span className="font-bold">{baht(b.amount)}</span>
             </div>
-            <div className="h-2 rounded-full mt-1" style={{ background: "#E8F1F6" }}>
-              <div className="h-2 rounded-full" style={{ width: `${(b.amount / max) * 100}%`, background: i === 0 ? C.accent : "#A5D4E0" }} />
+            <div className="h-2 rounded-full mt-1" style={{ background: "var(--line)" }}>
+              <div className="h-2 rounded-full" style={{ width: `${(b.amount / max) * 100}%`, background: i === 0 ? C.accent : "var(--bar2)" }} />
             </div>
             <p className="text-[11px] mt-0.5" style={{ color: C.muted }}>{b.count} ครั้ง · {num(b.kwh)} kWh{b.avg ? ` · เฉลี่ย ${num(b.avg)} ฿/kWh` : ""}</p>
           </div>
@@ -813,17 +815,37 @@ function ReportBody({ title, range, rows, opts, jobStats, vehicle }) {
                 <thead><tr style={{ borderBottom: "1px solid #999" }}><th className={th}>งาน/ทริป</th><th className={`${th} ${R}`}>ครั้ง</th><th className={`${th} ${R}`}>ค่าไฟ (บาท)</th><th className={`${th} ${R}`}>กม.</th><th className={`${th} ${R}`}>฿/กม.</th></tr></thead>
                 <tbody>
                   {jobList.map((s) => (
-                    <tr key={s.code} style={{ borderBottom: "1px solid #e5e5e5" }}>
-                      <td className={td}><b>{s.code}</b>{s.title ? ` · ${s.title}` : ""}</td>
-                      <td className={`${td} ${R}`}>{s.count}</td>
-                      <td className={`${td} ${R}`}>{num(s.amount)}</td>
-                      <td className={`${td} ${R}`}>{s.km ? `${num(s.km, 0)}${s.kmSource === "manual" ? "" : "*"}` : "-"}</td>
-                      <td className={`${td} ${R}`}>{s.perKm ? num(s.perKm) : "-"}</td>
-                    </tr>
+                    <React.Fragment key={s.code}>
+                      <tr style={{ borderBottom: "1px solid #e5e5e5" }}>
+                        <td className={td}><b>{s.code}</b>{s.title ? ` · ${s.title}` : ""}{s.legs.length > 1 ? ` (${s.legs.length} เที่ยว)` : ""}</td>
+                        <td className={`${td} ${R}`}>{s.count}</td>
+                        <td className={`${td} ${R}`}>{num(s.amount)}</td>
+                        <td className={`${td} ${R}`}>{s.km ? `${num(s.km, 0)}${s.kmSource === "manual" ? "" : "*"}` : "-"}</td>
+                        <td className={`${td} ${R}`}>{s.perKm ? num(s.perKm) : "-"}</td>
+                      </tr>
+                      {s.legs.length > 1 && s.rollup.legs.map((ls, i) => (
+                        <tr key={s.code + "-leg-" + i} style={{ borderBottom: "1px solid #f0f0f0", color: "#555" }}>
+                          <td className={td} style={{ paddingLeft: 14 }}>เที่ยวที่ {i + 1} · {fmtShort(ls.leg.startDate || "")}–{fmtShort(ls.leg.endDate || "")}</td>
+                          <td className={`${td} ${R}`}>{ls.count}</td>
+                          <td className={`${td} ${R}`}>{num(ls.amount)}</td>
+                          <td className={`${td} ${R}`}>{ls.km ? `${num(ls.km, 0)}*` : "-"}</td>
+                          <td className={`${td} ${R}`}>{ls.perKm ? num(ls.perKm) : "-"}</td>
+                        </tr>
+                      ))}
+                      {s.rollup.months.length > 1 && s.rollup.months.map((m) => (
+                        <tr key={s.code + "-m-" + m.key} style={{ borderBottom: "1px solid #f0f0f0", color: "#777" }}>
+                          <td className={td} style={{ paddingLeft: 14 }}>เดือน {monthKeyLabel(m.key)}</td>
+                          <td className={`${td} ${R}`}>{m.count}</td>
+                          <td className={`${td} ${R}`}>{num(m.amount)}</td>
+                          <td className={`${td} ${R}`}>{m.km ? `${num(m.km, 0)}*` : "-"}</td>
+                          <td className={`${td} ${R}`}>-</td>
+                        </tr>
+                      ))}
+                    </React.Fragment>
                   ))}
                 </tbody>
               </table>
-              <p className="text-[11px] mt-1" style={{ color: "#666" }}>ยอดของแต่ละงานเป็นยอดรวมทั้งงาน · กม. จากระยะไป-กลับที่กรอก, * = คำนวณจากเลขไมล์สูงสุด−ต่ำสุดของงานนั้น</p>
+              <p className="text-[11px] mt-1" style={{ color: "#666" }}>ยอดของแต่ละงานเป็นยอดรวมทั้งงาน · กม. จากระยะไป-กลับที่กรอก, * = คำนวณจากเลขไมล์ (ไมล์เริ่ม/จบหรือสูงสุด−ต่ำสุดของแต่ละเที่ยว); ระยะของเที่ยวนับในเดือนของบิลแรกของเที่ยว</p>
             </>
           )}
         </>
@@ -904,7 +926,7 @@ function ReportSheet({ entries, jobStats, startDay, vehicle, onClose }) {
   const toggle = (k) => setOpts((p) => ({ ...p, [k]: !p[k] }));
   const anyOn = Object.values(opts).some(Boolean);
   const body = <ReportBody title="รายงานสรุปค่าไฟ EV" range={range} rows={rows} opts={opts} jobStats={jobStats} vehicle={vehicle} />;
-  const inputCls = "w-full px-3 py-3 rounded-2xl bg-white outline-none text-base";
+  const inputCls = "w-full px-3 py-3 rounded-2xl bg-[var(--card)] outline-none text-base";
 
   return (
     <>
@@ -938,10 +960,10 @@ function ReportSheet({ entries, jobStats, startDay, vehicle, onClose }) {
         )}
 
         <p className="text-sm font-medium mb-2 mt-2">เลือกหัวข้อที่จะพิมพ์</p>
-        <div className="rounded-3xl bg-white p-2 mb-4" style={{ border: `1px solid ${C.line}` }}>
+        <div className="rounded-3xl bg-[var(--card)] p-2 mb-4" style={{ border: `1px solid ${C.line}` }}>
           {REPORT_SECTIONS.map(([k, label]) => (
-            <button key={k} onClick={() => toggle(k)} className="w-full flex items-center gap-3 px-3 py-3 text-left text-sm rounded-2xl active:bg-stone-100">
-              {opts[k] ? <CheckSquare size={22} color={C.accent} /> : <Square size={22} color={C.muted} />}
+            <button key={k} onClick={() => toggle(k)} className="w-full flex items-center gap-3 px-3 py-3 text-left text-sm rounded-2xl active:opacity-70">
+              {opts[k] ? <CheckSquare size={22} color={C.accentText} /> : <Square size={22} color={C.muted} />}
               <span style={{ fontWeight: opts[k] ? 600 : 400 }}>{label}</span>
             </button>
           ))}
@@ -954,7 +976,7 @@ function ReportSheet({ entries, jobStats, startDay, vehicle, onClose }) {
         <p className="text-[11px] mt-2 text-center" style={{ color: C.muted }}>ในหน้าต่างพิมพ์ เลือก "บันทึกเป็น PDF" เพื่อเก็บหรือส่งต่อได้</p>
 
         <p className="text-sm font-medium mt-6 mb-2">ตัวอย่างรายงาน</p>
-        <div className="rounded-2xl bg-white p-4 overflow-x-auto" style={{ border: `1px solid ${C.line}` }}>{body}</div>
+        <div className="rounded-2xl p-4 overflow-x-auto" style={{ border: `1px solid ${C.line}`, background: "#fff", color: "#222" }}>{body}</div>
       </Sheet>
     </>
   );
@@ -964,12 +986,12 @@ function TrendCard({ data }) {
   const max = Math.max(1, ...data.map((d) => d.total));
   const compact = (n) => (n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(Math.round(n)));
   return (
-    <div className="rounded-3xl bg-white p-6 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
+    <div className="rounded-3xl bg-[var(--card)] p-6 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
       <div className="flex items-center justify-between mb-4">
         <h2 className="font-semibold">ค่าไฟย้อนหลัง 6 รอบ</h2>
         <div className="flex items-center gap-3 text-[10px]" style={{ color: C.muted }}>
           <span className="flex items-center gap-1"><i className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: C.accent }} />บ้าน</span>
-          <span className="flex items-center gap-1"><i className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: C.ink }} />สถานี</span>
+          <span className="flex items-center gap-1"><i className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: C.strong }} />สถานี</span>
         </div>
       </div>
       <div className="flex items-end justify-between gap-2" style={{ height: 150 }}>
@@ -979,8 +1001,8 @@ function TrendCard({ data }) {
           return (
             <div key={i} className="flex-1 flex flex-col items-center justify-end h-full">
               <span className="text-[10px] mb-1" style={{ color: d.active ? C.ink : C.muted, fontWeight: d.active ? 700 : 400 }}>{d.total ? compact(d.total) : ""}</span>
-              <div className="w-full rounded-lg overflow-hidden flex flex-col justify-end" style={{ height: Math.max(h, d.total ? 4 : 2), background: d.total ? "transparent" : "#E8F1F6", opacity: d.active ? 1 : 0.7 }}>
-                <div style={{ height: h - hHome, background: C.ink }} />
+              <div className="w-full rounded-lg overflow-hidden flex flex-col justify-end" style={{ height: Math.max(h, d.total ? 4 : 2), background: d.total ? "transparent" : "var(--line)", opacity: d.active ? 1 : 0.7 }}>
+                <div style={{ height: h - hHome, background: C.strong }} />
                 <div style={{ height: hHome, background: C.accent }} />
               </div>
               <span className="text-[10px] mt-1.5 whitespace-nowrap" style={{ color: d.active ? C.ink : C.muted, fontWeight: d.active ? 700 : 400 }}>{d.short}</span>
@@ -1007,12 +1029,12 @@ function PriceCompare({ entries, homeRate }) {
   const max = Math.max(1, ...rows.map((r) => r.rate), homeRate);
 
   return (
-    <div className="rounded-3xl bg-white p-6 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
+    <div className="rounded-3xl bg-[var(--card)] p-6 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
       <div className="flex items-center justify-between mb-4">
         <h2 className="font-semibold">เทียบราคาต่อ kWh</h2>
-        <div className="flex gap-1 p-1 rounded-xl" style={{ background: "#E8F1F6" }}>
+        <div className="flex gap-1 p-1 rounded-xl" style={{ background: "var(--line)" }}>
           {[["provider", "ตามค่าย"], ["station", "ตามสถานี"]].map(([v, l]) => (
-            <button key={v} onClick={() => setMode(v)} className="px-3 py-1 rounded-lg text-xs font-semibold" style={{ background: mode === v ? "#fff" : "transparent", color: mode === v ? C.accent : C.muted }}>{l}</button>
+            <button key={v} onClick={() => setMode(v)} className="px-3 py-1 rounded-lg text-xs font-semibold" style={{ background: mode === v ? "var(--card)" : "transparent", color: mode === v ? C.accentText : C.muted }}>{l}</button>
           ))}
         </div>
       </div>
@@ -1023,11 +1045,11 @@ function PriceCompare({ entries, homeRate }) {
             <div className="flex justify-between text-sm mb-1 gap-2">
               <span className="truncate">
                 {r.name}
-                {i === 0 && rows.length > 1 && <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-md" style={{ background: "#E6F4EE", color: C.green }}>ถูกสุด</span>}
+                {i === 0 && rows.length > 1 && <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-md" style={{ background: "var(--green-soft)", color: C.green }}>ถูกสุด</span>}
               </span>
               <span className="font-semibold shrink-0">{num(r.rate)} <span className="font-normal text-xs" style={{ color: C.muted }}>฿/kWh · {r.count} ครั้ง</span></span>
             </div>
-            <div className="h-2 rounded-full overflow-hidden" style={{ background: "#EDF4F7" }}>
+            <div className="h-2 rounded-full overflow-hidden" style={{ background: "var(--line)" }}>
               <div className="h-full rounded-full" style={{ width: `${(r.rate / max) * 100}%`, background: i === 0 ? C.green : C.accent }} />
             </div>
           </div>
@@ -1048,7 +1070,7 @@ function PersonalCard({ monthly, period, onOpen }) {
   const station = rows.filter((e) => e.place === "station").reduce((s, e) => s + e.amount, 0);
   const avg = kwh ? total / kwh : 0;
   return (
-    <div className="rounded-3xl bg-white p-6 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
+    <div className="rounded-3xl bg-[var(--card)] p-6 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
       <div className="mb-3">
         <h2 className="font-semibold">สรุปส่วนตัว</h2>
         <p className="text-xs mt-0.5" style={{ color: C.muted }}>{period.label}</p>
@@ -1080,22 +1102,22 @@ function PersonalCard({ monthly, period, onOpen }) {
 function CompanyCard({ monthly, period, onToggle, onExport, onOpen }) {
   const rows = monthly.rows.filter((e) => e.category === "company");
   return (
-    <div className="rounded-3xl bg-white p-6 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
+    <div className="rounded-3xl bg-[var(--card)] p-6 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
       <div className="flex items-start justify-between mb-3">
         <div>
           <h2 className="font-semibold">เบิกบริษัท</h2>
           <p className="text-xs mt-0.5" style={{ color: C.muted }}>{period.label}</p>
         </div>
-        <button onClick={onExport} disabled={rows.length === 0} className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold" style={{ background: C.accentSoft, color: C.accent, opacity: rows.length ? 1 : 0.4 }}>
+        <button onClick={onExport} disabled={rows.length === 0} className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold" style={{ background: C.accentSoft, color: C.accentText, opacity: rows.length ? 1 : 0.4 }}>
           <Download size={14} /> Export CSV
         </button>
       </div>
       <div className="grid grid-cols-2 gap-2 mb-4">
         <div className="rounded-2xl px-4 py-3" style={{ background: C.accentSoft }}>
-          <p className="text-xs" style={{ color: C.accent }}>รอเบิก</p>
+          <p className="text-xs" style={{ color: C.accentText }}>รอเบิก</p>
           <p className="font-bold">{baht(monthly.companyPending)}</p>
         </div>
-        <div className="rounded-2xl px-4 py-3" style={{ background: "#E6F4EE" }}>
+        <div className="rounded-2xl px-4 py-3" style={{ background: "var(--green-soft)" }}>
           <p className="text-xs" style={{ color: C.green }}>เบิกแล้ว</p>
           <p className="font-bold">{baht(monthly.companyPaid)}</p>
         </div>
@@ -1121,7 +1143,7 @@ function CompanyCard({ monthly, period, onToggle, onExport, onOpen }) {
 
 function Stat({ label, value, unit, big }) {
   return (
-    <div className="rounded-2xl p-4" style={{ background: "#F4FAFB" }}>
+    <div className="rounded-2xl p-4" style={{ background: "var(--bg)" }}>
       <p className="text-xs mb-1" style={{ color: C.muted }}>{label}</p>
       <p className={big ? "text-2xl font-bold" : "text-xl font-bold"}>{value}</p>
       <p className="text-xs" style={{ color: C.muted }}>{unit}</p>
@@ -1138,36 +1160,36 @@ function JobsTab({ stats, onOpen, onNew }) {
           <h2 className="text-xl font-bold">งาน / ทริป</h2>
           <p className="text-xs mt-0.5" style={{ color: C.muted }}>ดูค่าชาร์จและระยะทางแยกตามเลขงาน หรือทริปเที่ยว (ใช้ได้ทั้งส่วนตัวและบริษัท)</p>
         </div>
-        <button onClick={onNew} className="flex items-center gap-1.5 px-4 py-2.5 rounded-2xl text-white text-sm font-semibold" style={{ background: C.ink }}>
+        <button onClick={onNew} className="flex items-center gap-1.5 px-4 py-2.5 rounded-2xl text-white text-sm font-semibold" style={{ background: C.strong }}>
           <Plus size={16} /> เพิ่ม
         </button>
       </div>
       {stats.length === 0 && (
-        <div className="rounded-3xl bg-white p-8 text-center" style={{ border: `1px dashed ${C.line}` }}>
+        <div className="rounded-3xl bg-[var(--card)] p-8 text-center" style={{ border: `1px dashed ${C.line}` }}>
           <p className="font-semibold mb-1">ยังไม่มีงานหรือทริป</p>
           <p className="text-sm" style={{ color: C.muted }}>ใส่เลขงานหรือชื่อทริป (เช่น ทริปหัวหิน) ตอนบันทึกค่าชาร์จ หรือกด "เพิ่ม" ได้เลย</p>
         </div>
       )}
       <div className="space-y-3">
         {stats.map((s) => (
-          <button key={s.code} onClick={() => onOpen(s.code)} className="w-full text-left rounded-3xl bg-white p-4 shadow-sm active:scale-[0.99] transition" style={{ border: `1px solid ${C.line}` }}>
+          <button key={s.code} onClick={() => onOpen(s.code)} className="w-full text-left rounded-3xl bg-[var(--card)] p-4 shadow-sm active:scale-[0.99] transition" style={{ border: `1px solid ${C.line}` }}>
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
-                <p className="font-semibold truncate">งาน {s.code}</p>
+                <p className="font-semibold truncate">งาน {s.code}{s.legs.length > 1 && <span className="ml-2 text-[10px] font-semibold px-2 py-0.5 rounded-full align-middle" style={{ background: C.accentSoft, color: C.accentText }}>{s.legs.length} เที่ยว</span>}</p>
                 {s.title && <p className="text-xs truncate" style={{ color: C.muted }}>{s.title}</p>}
               </div>
               <ChevronRight size={18} color={C.muted} className="shrink-0" />
             </div>
             <div className="grid grid-cols-3 gap-2 mt-3 text-center">
-              <div className="rounded-xl py-2" style={{ background: "#F4FAFB" }}>
+              <div className="rounded-xl py-2" style={{ background: "var(--bg)" }}>
                 <p className="text-[10px]" style={{ color: C.muted }}>ค่าชาร์จ</p>
                 <p className="text-sm font-bold">{baht(s.amount)}</p>
               </div>
-              <div className="rounded-xl py-2" style={{ background: "#F4FAFB" }}>
+              <div className="rounded-xl py-2" style={{ background: "var(--bg)" }}>
                 <p className="text-[10px]" style={{ color: C.muted }}>ระยะไป-กลับ</p>
                 <p className="text-sm font-bold">{s.km > 0 ? `${num(s.km, 0)} กม.` : "-"}</p>
               </div>
-              <div className="rounded-xl py-2" style={{ background: "#F4FAFB" }}>
+              <div className="rounded-xl py-2" style={{ background: "var(--bg)" }}>
                 <p className="text-[10px]" style={{ color: C.muted }}>฿/กม.</p>
                 <p className="text-sm font-bold">{s.perKm > 0 ? num(s.perKm) : "-"}</p>
               </div>
@@ -1180,23 +1202,60 @@ function JobsTab({ stats, onOpen, onNew }) {
   );
 }
 
-function JobSheet({ isNew, stat, entries, billKm, onClose, onSave, onDelete }) {
+const addDays = (ymd, n) => {
+  const [y, m, d] = ymd.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
+};
+const monthKeyLabel = (k) => { const [y, m] = k.split("-").map(Number); return `${THMONTH[m - 1]} ${y + 543}`; };
+const KM_SRC = { manual: "ระยะกรอกเอง", trip: "ไมล์เริ่ม/จบ", odo: "จากเลขไมล์", legs: "รวมจากแต่ละเที่ยว" };
+
+function JobSheet({ isNew, stat, entries, billKm, onClose, onSave, onSaveLegs, onDelete }) {
   const [code, setCode] = useState(stat?.code || "");
   const [title, setTitle] = useState(stat?.title || "");
   const [km, setKm] = useState(stat?.roundTripKm ? String(stat.roundTripKm) : "");
-  const [startOdo, setStartOdo] = useState(stat?.startOdo ? String(stat.startOdo) : "");
-  const [endOdo, setEndOdo] = useState(stat?.endOdo ? String(stat.endOdo) : "");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  // ร่างเที่ยว: เริ่มจากเที่ยวที่แสดงอยู่ (อัตโนมัติหรือที่บันทึกไว้) แก้ได้ แล้วกด "บันทึกเที่ยว"
+  const [draft, setDraft] = useState(() => (stat ? stat.legs.filter((l) => l.source !== "unassigned").map((l) => ({
+    startDate: l.startDate, endDate: l.endDate,
+    startOdo: l.startOdo ? String(l.startOdo) : "", endOdo: l.endOdo ? String(l.endOdo) : "",
+  })) : []));
+  const [dirty, setDirty] = useState(false);
 
-  const rows = stat ? entries.filter((e) => e.job === stat.code).sort((a, b) => (a.date < b.date ? 1 : -1)) : [];
+  const rows = stat ? entries.filter((e) => e.job === stat.code).sort((a, b) => (a.date < b.date ? -1 : 1)) : [];
+  const preview = useMemo(() => {
+    if (!stat) return null;
+    const saved = draft.map((d, i) => ({ id: String(i), job_code: stat.code, start_date: d.startDate, end_date: d.endDate, start_odo: parseInt(d.startOdo) || 0, end_odo: parseInt(d.endOdo) || 0 }));
+    return jobRollup(applySavedLegs(rows, saved), parseFloat(km) > 0 ? parseFloat(km) : 0);
+  }, [draft, km, entries, stat]);
+
+  const edit = (fn) => { setDraft((d) => fn(d.map((x) => ({ ...x })))); setDirty(true); };
+  const setField = (di, k, v) => edit((d) => { d[di][k] = v; return d; });
+  const mergePrev = (di) => edit((d) => {
+    const order = d.map((x, i) => i).sort((x, y) => (d[x].startDate < d[y].startDate ? -1 : 1));
+    const pos = order.indexOf(di);
+    if (pos <= 0) return d;
+    const prev = d[order[pos - 1]], cur = d[di];
+    prev.endDate = cur.endDate > prev.endDate ? cur.endDate : prev.endDate;
+    prev.endOdo = cur.endOdo || prev.endOdo;
+    return d.filter((_, i) => i !== di);
+  });
+  const splitAt = (di, billDate) => edit((d) => {
+    const day = billDate.slice(0, 10);
+    const leg = d[di];
+    if (day <= leg.startDate) return d;
+    d.push({ startDate: day, endDate: leg.endDate, startOdo: "", endOdo: leg.endOdo });
+    leg.endDate = addDays(day, -1);
+    leg.endOdo = "";
+    return d;
+  });
 
   const save = async () => {
     const c = code.trim().toUpperCase();
     if (!c) { setErr("ใส่เลขงานก่อน"); return; }
     setBusy(true); setErr("");
     try {
-      await onSave({ code: c, title: title.trim(), round_trip_km: parseFloat(km) > 0 ? parseFloat(km) : null, start_odo: parseInt(startOdo) > 0 ? parseInt(startOdo) : null, end_odo: parseInt(endOdo) > 0 ? parseInt(endOdo) : null });
+      await onSave({ code: c, title: title.trim(), round_trip_km: parseFloat(km) > 0 ? parseFloat(km) : null });
       onClose();
     } catch (e) {
       setErr("บันทึกไม่สำเร็จ ลองใหม่อีกครั้ง");
@@ -1205,18 +1264,49 @@ function JobSheet({ isNew, stat, entries, billKm, onClose, onSave, onDelete }) {
     }
   };
 
+  const saveLegs = async () => {
+    const sorted = [...draft].sort((a, b) => (a.startDate < b.startDate ? -1 : 1));
+    for (let i = 0; i < sorted.length; i++) {
+      const l = sorted[i];
+      if (!l.startDate || !l.endDate || l.endDate < l.startDate) { setErr("วันที่เที่ยวไม่ถูกต้อง (วันจบต้องไม่ก่อนวันเริ่ม)"); return; }
+      if (i > 0 && l.startDate <= sorted[i - 1].endDate) { setErr("ช่วงวันที่ของเที่ยวซ้อนกัน ปรับให้ไม่ทับกัน"); return; }
+    }
+    setBusy(true); setErr("");
+    try {
+      await onSaveLegs(stat.code, sorted.map((l) => ({ start_date: l.startDate, end_date: l.endDate, start_odo: parseInt(l.startOdo) || null, end_odo: parseInt(l.endOdo) || null })));
+      setDirty(false);
+    } catch (e) {
+      setErr("บันทึกเที่ยวไม่สำเร็จ ลองใหม่อีกครั้ง");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resetAuto = async () => {
+    setBusy(true); setErr("");
+    try { await onSaveLegs(stat.code, []); onClose(); } catch (e) { setErr("ทำไม่สำเร็จ ลองใหม่อีกครั้ง"); setBusy(false); }
+  };
+
   const remove = async () => {
     setBusy(true);
     try { await onDelete(stat.code); onClose(); } catch (e) { setErr("ลบไม่สำเร็จ"); setBusy(false); }
   };
 
+  const total = preview?.total;
+  const legCount = preview?.legs.length || 0;
+  const srcLabel = preview && legCount === 1 ? KM_SRC[preview.legs[0].kmSource] : legCount > 1 && total.km > 0 ? KM_SRC.legs : "";
+  const miniCell = "rounded-xl py-2 text-center";
+
   return (
     <Sheet title={isNew ? "เพิ่มงาน/ทริปใหม่" : `งาน ${stat?.code}`} onClose={onClose}>
-      {stat && (
-        <div className="grid grid-cols-2 gap-3 mb-5">
-          <Stat label="ค่าชาร์จรวม" value={baht(stat.amount)} unit={`${stat.count} ครั้ง · ${num(stat.kwh, 1)} kWh`} big />
-          <Stat label="ต้นทุนต่อกิโล" value={stat.perKm > 0 ? num(stat.perKm) : "-"} unit={stat.km > 0 ? `฿/กม. (${stat.kmSource === "manual" ? "ระยะกรอกเอง" : stat.kmSource === "trip" ? "ไมล์เริ่ม/จบ" : "จากเลขไมล์"})` : "ใส่ระยะทางด้านล่าง"} big />
-        </div>
+      {stat && total && (
+        <>
+          <p className="text-xs font-semibold mb-2" style={{ color: C.muted }}>สะสมทั้งงาน{legCount > 1 ? ` (${legCount} เที่ยว)` : ""}</p>
+          <div className="grid grid-cols-2 gap-3 mb-5">
+            <Stat label="ค่าชาร์จรวม" value={baht(total.amount)} unit={`${total.count} ครั้ง · ${num(total.kwh, 1)} kWh`} big />
+            <Stat label="ต้นทุนต่อกิโล" value={total.perKm > 0 ? num(total.perKm) : "-"} unit={total.km > 0 ? `฿/กม. · ${num(total.km, 0)} กม.${srcLabel ? ` (${srcLabel})` : ""}` : "ใส่ไมล์ในแต่ละเที่ยว"} big />
+          </div>
+        </>
       )}
 
       <Field label="เลขงาน หรือ ชื่อทริป">
@@ -1227,47 +1317,129 @@ function JobSheet({ isNew, stat, entries, billKm, onClose, onSave, onDelete }) {
       </Field>
       <Field label="ระยะทางไป-กลับ (กม.)">
         <input type="number" inputMode="decimal" value={km} onChange={(e) => setKm(e.target.value)} placeholder="เช่น 240" className={inputCls} />
-        <p className="text-xs mt-1.5" style={{ color: C.muted }}>ไม่ใส่ก็ได้ ถ้ามีเลขไมล์ ระบบคำนวณระยะให้เอง</p>
+        <p className="text-xs mt-1.5" style={{ color: C.muted }}>ไม่ใส่ก็ได้ ใช้เฉพาะงานที่มีเที่ยวเดียว ถ้ามีหลายเที่ยวให้ใส่ไมล์ในแต่ละเที่ยวด้านล่าง</p>
       </Field>
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="ไมล์ตอนออกเดินทาง">
-          <input type="number" inputMode="numeric" value={startOdo} onChange={(e) => setStartOdo(e.target.value)} placeholder="ก่อนชาร์จก็ได้" className={inputCls} />
-        </Field>
-        <Field label="ไมล์ตอนจบทริป">
-          <input type="number" inputMode="numeric" value={endOdo} onChange={(e) => setEndOdo(e.target.value)} placeholder="ถึงที่หมาย" className={inputCls} />
-        </Field>
-      </div>
-      <p className="text-xs -mt-2 mb-4" style={{ color: C.muted }}>ดูเลขไมล์จากหน้าปัดรถตอนออก/ถึง แล้วกรอกที่นี่ภายหลังได้ ไม่ต้องรอตอนชาร์จ ถ้ากรอกระยะไป-กลับไว้ ระบบจะใช้ระยะนั้นก่อน</p>
 
       {err && <p className="text-sm mb-3" style={{ color: C.red }}>{err}</p>}
       <button onClick={save} disabled={busy} className="w-full py-3.5 rounded-2xl text-white font-bold flex items-center justify-center gap-2 mb-3" style={{ background: C.accent }}>
         {busy ? <Loader2 size={18} className="animate-spin" /> : "บันทึกงาน"}
       </button>
 
-      {rows.length > 0 && (
-        <div className="mt-5">
-          <p className="text-sm font-semibold mb-2" style={{ color: C.muted }}>รายการชาร์จของงานนี้</p>
-          {rows.map((e) => (
-            <div key={e.id} className="flex justify-between py-2 text-sm" style={{ borderBottom: `1px solid ${C.line}` }}>
-              <span className="truncate">
-                {fmtShort(e.date)} · {e.station || e.provider}
-                {billKm?.get(e.id) && <span className="block text-[11px]" style={{ color: C.muted }}>{num(billKm.get(e.id).km, 0)} กม. จากครั้งก่อน · ฿{num(billKm.get(e.id).perKm)}/กม.</span>}
-              </span>
-              <span className="font-semibold ml-3 shrink-0">{baht(e.amount)}</span>
+      {stat && preview && rows.length > 0 && (
+        <div className="mt-6">
+          <div className="flex items-center justify-between mb-1">
+            <p className="text-sm font-semibold" style={{ color: C.muted }}>แต่ละเที่ยว</p>
+            {stat.hasSavedLegs && <button onClick={resetAuto} disabled={busy} className="text-xs font-semibold underline" style={{ color: C.accentText }}>กลับไปใช้อัตโนมัติ</button>}
+          </div>
+          <p className="text-[11px] mb-3" style={{ color: C.muted }}>
+            {stat.hasSavedLegs ? "เที่ยวที่คุณบันทึกไว้" : "แบ่งอัตโนมัติ: บิลห่างกันเกิน 3 วันเป็นเที่ยวใหม่"} · แก้วันที่/ไมล์ หรือรวม/แยกเที่ยว แล้วกด "บันทึกเที่ยว"
+          </p>
+          {preview.legs.map((ls, idx) => {
+            const leg = ls.leg;
+            const di = leg.source === "saved" ? Number(leg.id) : -1;
+            const d = di >= 0 ? draft[di] : null;
+            return (
+              <div key={leg.key + idx} className="rounded-2xl p-3 mb-3" style={{ border: `1px solid ${C.line}`, background: "var(--card)" }}>
+                <div className="flex justify-between items-baseline">
+                  <p className="text-sm font-bold">{di >= 0 ? `เที่ยวที่ ${idx + 1}` : "ยังไม่จัดเที่ยว"}</p>
+                  <p className="text-[11px]" style={{ color: C.muted }}>{fmtShort(leg.startDate || "")} – {fmtShort(leg.endDate || "")}</p>
+                </div>
+                <div className="grid grid-cols-4 gap-1.5 mt-2">
+                  {[["กม.", ls.km > 0 ? num(ls.km, 0) : "-"], ["ค่าชาร์จ", baht(ls.amount)], ["฿/กม.", ls.perKm > 0 ? num(ls.perKm) : "-"], ["ครั้ง", String(ls.count)]].map(([l, v]) => (
+                    <div key={l} className={miniCell} style={{ background: C.bg }}>
+                      <p className="text-[10px]" style={{ color: C.muted }}>{l}</p>
+                      <p className="text-xs font-bold">{v}</p>
+                    </div>
+                  ))}
+                </div>
+                {d ? (
+                  <>
+                    <div className="grid grid-cols-2 gap-2 mt-3">
+                      <label className="text-[11px]" style={{ color: C.muted }}>วันเริ่ม<input type="date" value={d.startDate} onChange={(e) => setField(di, "startDate", e.target.value)} className={`${inputCls} mt-1`} /></label>
+                      <label className="text-[11px]" style={{ color: C.muted }}>วันจบ<input type="date" value={d.endDate} onChange={(e) => setField(di, "endDate", e.target.value)} className={`${inputCls} mt-1`} /></label>
+                      <label className="text-[11px]" style={{ color: C.muted }}>ไมล์ออกเดินทาง<input type="number" inputMode="numeric" value={d.startOdo} onChange={(e) => setField(di, "startOdo", e.target.value)} placeholder="ก่อนชาร์จก็ได้" className={`${inputCls} mt-1`} /></label>
+                      <label className="text-[11px]" style={{ color: C.muted }}>ไมล์จบเที่ยว<input type="number" inputMode="numeric" value={d.endOdo} onChange={(e) => setField(di, "endOdo", e.target.value)} placeholder="ถึงที่หมาย" className={`${inputCls} mt-1`} /></label>
+                    </div>
+                    {idx > 0 && preview.legs[idx - 1].leg.source === "saved" && (
+                      <button onClick={() => mergePrev(di)} className="mt-2 text-xs font-semibold underline" style={{ color: C.accentText }}>รวมกับเที่ยวก่อนหน้า</button>
+                    )}
+                  </>
+                ) : (
+                  <p className="text-[11px] mt-2" style={{ color: C.muted }}>บิลเหล่านี้อยู่นอกช่วงวันที่ของทุกเที่ยว (ยังนับในยอดสะสม) ปรับวันที่ของเที่ยวให้ครอบคลุมได้</p>
+                )}
+                <div className="mt-2">
+                  {[...leg.rows].sort((a, b) => (a.date < b.date ? 1 : -1)).map((e) => (
+                    <div key={e.id} className="flex justify-between items-start py-1.5 text-xs" style={{ borderTop: `1px solid ${C.line}` }}>
+                      <span className="min-w-0">
+                        <span className="truncate block">{fmtShort(e.date)} · {e.station || e.provider}</span>
+                        {billKm?.get(e.id) && <span className="block text-[11px]" style={{ color: C.muted }}>{num(billKm.get(e.id).km, 0)} กม. จากครั้งก่อน · ฿{num(billKm.get(e.id).perKm)}/กม.</span>}
+                        {d && e.date.slice(0, 10) > d.startDate && (
+                          <button onClick={() => splitAt(di, e.date)} className="text-[11px] underline" style={{ color: C.accentText }}>แยกเที่ยวตั้งแต่บิลนี้</button>
+                        )}
+                      </span>
+                      <span className="font-semibold ml-3 shrink-0">{baht(e.amount)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+          {dirty && (
+            <button onClick={saveLegs} disabled={busy} className="w-full py-3 rounded-2xl text-white font-bold mb-2" style={{ background: C.strong }}>
+              {busy ? <Loader2 size={18} className="animate-spin inline" /> : "บันทึกเที่ยว"}
+            </button>
+          )}
+
+          {preview.months.length > 0 && (
+            <div className="mt-4">
+              <p className="text-sm font-semibold mb-2" style={{ color: C.muted }}>รวมรายเดือน</p>
+              {preview.months.map((m) => (
+                <div key={m.key} className="flex justify-between py-2 text-sm" style={{ borderBottom: `1px solid ${C.line}` }}>
+                  <span>{monthKeyLabel(m.key)}<span className="block text-[11px]" style={{ color: C.muted }}>{m.count} ครั้ง · {num(m.kwh, 1)} kWh{m.km > 0 ? ` · ${num(m.km, 0)} กม.` : ""}</span></span>
+                  <span className="font-semibold">{baht(m.amount)}</span>
+                </div>
+              ))}
             </div>
-          ))}
+          )}
         </div>
       )}
 
       {stat && stat.count === 0 && (
-        <button onClick={remove} disabled={busy} className="w-full mt-4 py-3 rounded-2xl font-semibold text-sm" style={{ background: "#FDECEC", color: C.red }}>ลบงานนี้</button>
+        <button onClick={remove} disabled={busy} className="w-full mt-4 py-3 rounded-2xl font-semibold text-sm" style={{ background: "var(--red-soft)", color: C.red }}>ลบงานนี้</button>
       )}
     </Sheet>
   );
 }
 
 /* ---------------- Add sheet ---------------- */
+const ListsCtx = React.createContext({ providers: [], stations: [] });
+
+function ProviderField({ value, onChange }) {
+  const { providers } = React.useContext(ListsCtx);
+  const options = useMemo(() => mergeProviders([...providers, value]), [providers, value]);
+  const [custom, setCustom] = useState(false);
+  return (
+    <>
+      <select
+        value={custom ? "__new__" : value}
+        onChange={(ev) => {
+          if (ev.target.value === "__new__") { setCustom(true); onChange(""); }
+          else { setCustom(false); onChange(ev.target.value); }
+        }}
+        className={inputCls}
+      >
+        {options.map((p) => <option key={p}>{p}</option>)}
+        <option value="__new__">+ เพิ่มค่ายใหม่…</option>
+      </select>
+      {custom && (
+        <input autoFocus value={value} onChange={(ev) => onChange(ev.target.value)} placeholder="พิมพ์ชื่อผู้ให้บริการ" className={`${inputCls} mt-2`} />
+      )}
+    </>
+  );
+}
+
 function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
+  const knownProviders = React.useContext(ListsCtx).providers;
   const w = thaiWallNow().toISOString();
   const [f, setF] = useState({
     place: "station", provider: "EV Station PluZ", station: "", conn: "DC",
@@ -1301,13 +1473,13 @@ function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
       setF((p) => ({
         ...p,
         place: "station",
-        provider: PROVIDERS.includes(j.provider) ? j.provider : p.provider,
+        provider: mergeProviders(knownProviders).find((x) => x.toLowerCase() === (j.provider || "").trim().toLowerCase()) || p.provider,
         station: j.station || p.station,
         conn: j.conn === "AC" || j.conn === "DC" ? j.conn : p.conn,
         kwh: j.kwh != null ? String(j.kwh) : p.kwh,
         amount: j.amount != null ? String(j.amount) : p.amount,
         date: j.date || p.date,
-        time: j.time || p.time,
+        time: normTime(j.time) || p.time,
         receiptNo: j.receipt_no || p.receiptNo,
       }));
     } catch (e) {
@@ -1330,7 +1502,7 @@ function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
         conn: f.place === "home" ? "AC" : f.conn,
         kwh: +kwh.toFixed(2),
         amount: +amount.toFixed(2),
-        date: `${f.date}T${f.time}:00`,
+        date: toChargedAt(f.date, f.time),
         odo: parseInt(f.odo) || 0,
         category: f.category,
         note: f.note,
@@ -1349,9 +1521,9 @@ function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
 
   return (
     <Sheet title="บันทึกค่าไฟ" onClose={onClose}>
-      <div className="grid grid-cols-2 gap-1 p-1 rounded-2xl mb-5" style={{ background: "#E8F1F6" }}>
+      <div className="grid grid-cols-2 gap-1 p-1 rounded-2xl mb-5" style={{ background: "var(--line)" }}>
         {[["station", "สถานี", <Zap size={16} key="z" />], ["home", "บ้าน", <Home size={16} key="h" />]].map(([v, l, ic]) => (
-          <button key={v} onClick={() => set("place", v)} className="py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-1.5 transition" style={{ background: f.place === v ? "#fff" : "transparent", color: f.place === v ? C.accent : C.muted }}>
+          <button key={v} onClick={() => set("place", v)} className="py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-1.5 transition" style={{ background: f.place === v ? "var(--card)" : "transparent", color: f.place === v ? C.accentText : C.muted }}>
             {ic}{l}
           </button>
         ))}
@@ -1359,24 +1531,22 @@ function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
 
       {f.place === "station" && (
         <>
-          <button onClick={() => fileRef.current?.click()} disabled={busy} className="w-full mb-5 py-4 rounded-2xl flex items-center justify-center gap-2 font-semibold text-sm" style={{ background: C.accentSoft, color: C.accent }}>
+          <button onClick={() => fileRef.current?.click()} disabled={busy} className="w-full mb-5 py-4 rounded-2xl flex items-center justify-center gap-2 font-semibold text-sm" style={{ background: C.accentSoft, color: C.accentText }}>
             {busy ? <Loader2 size={18} className="animate-spin" /> : <Camera size={18} />}
             {busy ? "กำลังอ่านใบเสร็จ..." : "ถ่ายรูป/เลือกรูปใบเสร็จ"}
           </button>
           <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={(e) => e.target.files?.[0] && pickFile(e.target.files[0])} />
 
           <Field label="ผู้ให้บริการ">
-            <select value={f.provider} onChange={(e) => set("provider", e.target.value)} className={inputCls}>
-              {PROVIDERS.map((p) => <option key={p}>{p}</option>)}
-            </select>
+            <ProviderField value={f.provider} onChange={(v) => set("provider", v)} />
           </Field>
           <Field label="ชื่อสถานี / สาขา">
-            <input value={f.station} onChange={(e) => set("station", e.target.value)} placeholder="เช่น PTT รัชดา" className={inputCls} />
+            <input list="stations-list" value={f.station} onChange={(e) => set("station", e.target.value)} placeholder="เช่น PTT รัชดา" className={inputCls} />
           </Field>
           <Field label="ประเภทการชาร์จ">
             <div className="grid grid-cols-2 gap-2">
               {["DC", "AC"].map((v) => (
-                <button key={v} onClick={() => set("conn", v)} className="py-3 rounded-2xl text-sm font-semibold" style={{ background: f.conn === v ? C.accent : "#fff", color: f.conn === v ? "#fff" : C.ink, border: `1px solid ${f.conn === v ? C.accent : C.line}` }}>
+                <button key={v} onClick={() => set("conn", v)} className="py-3 rounded-2xl text-sm font-semibold" style={{ background: f.conn === v ? C.accent : "var(--card)", color: f.conn === v ? "#fff" : C.ink, border: `1px solid ${f.conn === v ? C.accent : C.line}` }}>
                   {v} <span className="font-normal text-xs">{v === "DC" ? "เร็ว" : "ทั่วไป"}</span>
                 </button>
               ))}
@@ -1392,14 +1562,14 @@ function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
       {f.place === "home" && (
         <>
           <div className="rounded-2xl p-4 mb-4 flex items-center justify-between" style={{ background: C.accentSoft }}>
-            <div><p className="text-xs" style={{ color: C.accent }}>ค่าไฟโดยประมาณ</p><p className="text-2xl font-bold">{baht(homeAmount)}</p></div>
-            <span className="px-3 py-1.5 rounded-xl bg-white text-sm font-semibold">{num(homeKwh)} kWh</span>
+            <div><p className="text-xs" style={{ color: C.accentText }}>ค่าไฟโดยประมาณ</p><p className="text-2xl font-bold">{baht(homeAmount)}</p></div>
+            <span className="px-3 py-1.5 rounded-xl bg-[var(--card)] text-sm font-semibold">{num(homeKwh)} kWh</span>
           </div>
           <Field label="ระดับแบตเตอรี่">
-            <div className="rounded-2xl p-4 bg-white" style={{ border: `1px solid ${C.line}` }}>
+            <div className="rounded-2xl p-4 bg-[var(--card)]" style={{ border: `1px solid ${C.line}` }}>
               <div className="flex justify-between items-baseline mb-3">
                 <div><p className="text-xs" style={{ color: C.muted }}>เริ่ม</p><p className="text-3xl font-bold" style={{ color: C.muted }}>{f.socFrom}%</p></div>
-                <div className="text-right"><p className="text-xs" style={{ color: C.muted }}>จบ</p><p className="text-3xl font-bold" style={{ color: C.accent }}>{f.socTo}%</p></div>
+                <div className="text-right"><p className="text-xs" style={{ color: C.muted }}>จบ</p><p className="text-3xl font-bold" style={{ color: C.accentText }}>{f.socTo}%</p></div>
               </div>
               <input type="range" min="0" max="100" value={f.socFrom} onChange={(e) => set("socFrom", Math.min(+e.target.value, f.socTo - 1))} className="w-full mb-2" />
               <input type="range" min="0" max="100" value={f.socTo} onChange={(e) => set("socTo", Math.max(+e.target.value, f.socFrom + 1))} className="w-full" />
@@ -1423,7 +1593,7 @@ function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
       <Field label="ใช้สำหรับ">
         <div className="grid grid-cols-2 gap-2">
           {[["personal", "ส่วนตัว", <User size={15} key="u" />], ["company", "บริษัท", <Briefcase size={15} key="b" />]].map(([v, l, ic]) => (
-            <button key={v} onClick={() => set("category", v)} className="py-3 rounded-2xl text-sm font-semibold flex items-center justify-center gap-1.5" style={{ background: f.category === v ? C.accent : "#fff", color: f.category === v ? "#fff" : C.ink, border: `1px solid ${f.category === v ? C.accent : C.line}` }}>
+            <button key={v} onClick={() => set("category", v)} className="py-3 rounded-2xl text-sm font-semibold flex items-center justify-center gap-1.5" style={{ background: f.category === v ? C.accent : "var(--card)", color: f.category === v ? "#fff" : C.ink, border: `1px solid ${f.category === v ? C.accent : C.line}` }}>
               {ic}{l}
             </button>
           ))}
@@ -1436,7 +1606,7 @@ function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
         </Field>
       )}
 
-      <Field label={<span className="flex items-center gap-1"><Gauge size={14} /> เลขไมล์รถ <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: C.accentSoft, color: C.accent }}>ไม่บังคับ</span></span>}>
+      <Field label={<span className="flex items-center gap-1"><Gauge size={14} /> เลขไมล์รถ <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: C.accentSoft, color: C.accentText }}>ไม่บังคับ</span></span>}>
         <input type="number" inputMode="numeric" value={f.odo} onChange={(e) => set("odo", e.target.value)} placeholder="เช่น 22450" className={inputCls} />
       </Field>
 
@@ -1445,7 +1615,7 @@ function AddSheet({ onClose, onSave, avgRate, vehicle, userId }) {
       </Field>
 
       {rate > 0 && (
-        <div className="rounded-2xl p-4 mb-4 text-sm" style={{ background: "#F4FAFB" }}>
+        <div className="rounded-2xl p-4 mb-4 text-sm" style={{ background: "var(--bg)" }}>
           ครั้งนี้ <b>{num(rate)} ฿/kWh</b>
           {avgRate > 0 && (
             <span style={{ color: rate < avgRate ? C.green : C.red }}> · {rate < avgRate ? "ถูกกว่า" : "แพงกว่า"}ค่าเฉลี่ย {num(Math.abs(rate - avgRate))} ฿</span>
@@ -1486,7 +1656,7 @@ function DetailSheet({ e, billKm, avgRate, onClose, onDelete, onSaveEdit, onTogg
       await onSaveEdit(e.id, {
         place: f.place, provider: f.provider, station: f.station, conn: f.conn,
         kwh: +kwh.toFixed(2), amount: +amount.toFixed(2),
-        date: `${f.date}T${f.time}:00`,
+        date: toChargedAt(f.date, f.time),
         odo: parseInt(f.odo) || 0, category: f.category, note: f.note,
         receiptNo: f.receiptNo, job: f.job, reimbursed: e.reimbursed,
       });
@@ -1504,17 +1674,15 @@ function DetailSheet({ e, billKm, avgRate, onClose, onDelete, onSaveEdit, onTogg
         {f.place === "station" && (
           <>
             <Field label="ผู้ให้บริการ">
-              <select value={f.provider} onChange={(ev) => set("provider", ev.target.value)} className={inputCls}>
-                {PROVIDERS.map((p) => <option key={p}>{p}</option>)}
-              </select>
+              <ProviderField value={f.provider} onChange={(v) => set("provider", v)} />
             </Field>
             <Field label="ชื่อสถานี / สาขา">
-              <input value={f.station} onChange={(ev) => set("station", ev.target.value)} className={inputCls} />
+              <input list="stations-list" value={f.station} onChange={(ev) => set("station", ev.target.value)} className={inputCls} />
             </Field>
             <Field label="ประเภทการชาร์จ">
               <div className="grid grid-cols-2 gap-2">
                 {["DC", "AC"].map((v) => (
-                  <button key={v} onClick={() => set("conn", v)} className="py-3 rounded-2xl text-sm font-semibold" style={{ background: f.conn === v ? C.accent : "#fff", color: f.conn === v ? "#fff" : C.ink, border: `1px solid ${f.conn === v ? C.accent : C.line}` }}>{v}</button>
+                  <button key={v} onClick={() => set("conn", v)} className="py-3 rounded-2xl text-sm font-semibold" style={{ background: f.conn === v ? C.accent : "var(--card)", color: f.conn === v ? "#fff" : C.ink, border: `1px solid ${f.conn === v ? C.accent : C.line}` }}>{v}</button>
                 ))}
               </div>
             </Field>
@@ -1534,7 +1702,7 @@ function DetailSheet({ e, billKm, avgRate, onClose, onDelete, onSaveEdit, onTogg
         <Field label="ใช้สำหรับ">
           <div className="grid grid-cols-2 gap-2">
             {[["personal", "ส่วนตัว", <User size={15} key="u" />], ["company", "บริษัท", <Briefcase size={15} key="b" />]].map(([v, l, ic]) => (
-              <button key={v} onClick={() => set("category", v)} className="py-3 rounded-2xl text-sm font-semibold flex items-center justify-center gap-1.5" style={{ background: f.category === v ? C.accent : "#fff", color: f.category === v ? "#fff" : C.ink, border: `1px solid ${f.category === v ? C.accent : C.line}` }}>
+              <button key={v} onClick={() => set("category", v)} className="py-3 rounded-2xl text-sm font-semibold flex items-center justify-center gap-1.5" style={{ background: f.category === v ? C.accent : "var(--card)", color: f.category === v ? "#fff" : C.ink, border: `1px solid ${f.category === v ? C.accent : C.line}` }}>
                 {ic}{l}
               </button>
             ))}
@@ -1554,7 +1722,7 @@ function DetailSheet({ e, billKm, avgRate, onClose, onDelete, onSaveEdit, onTogg
 
         {err && <p className="text-sm mb-3" style={{ color: C.red }}>{err}</p>}
         <div className="flex gap-2">
-          <button onClick={() => setEditing(false)} className="flex-1 py-3.5 rounded-2xl font-semibold" style={{ background: "#EDF4F7", color: C.ink }}>ยกเลิก</button>
+          <button onClick={() => setEditing(false)} className="flex-1 py-3.5 rounded-2xl font-semibold" style={{ background: "var(--line)", color: C.ink }}>ยกเลิก</button>
           <button onClick={saveEdit} disabled={busy} className="flex-1 py-3.5 rounded-2xl text-white font-bold flex items-center justify-center gap-2" style={{ background: C.accent }}>
             {busy ? <Loader2 size={18} className="animate-spin" /> : "บันทึกการแก้ไข"}
           </button>
@@ -1572,7 +1740,7 @@ function DetailSheet({ e, billKm, avgRate, onClose, onDelete, onSaveEdit, onTogg
         <Stat label="ราคาต่อหน่วย" value={num(rate)} unit="฿/kWh" />
       </div>
       {avgRate > 0 && (
-        <div className="rounded-2xl p-4 mb-4 text-sm" style={{ background: rate < avgRate ? "#E6F4EE" : "#FDECEC" }}>
+        <div className="rounded-2xl p-4 mb-4 text-sm" style={{ background: rate < avgRate ? "var(--green-soft)" : "var(--red-soft)" }}>
           เทียบค่าเฉลี่ยของคุณ ({num(avgRate)} ฿/kWh) ครั้งนี้
           <b style={{ color: rate < avgRate ? C.green : C.red }}> {rate < avgRate ? "ประหยัดกว่า" : "แพงกว่า"} {num(Math.abs(rate - avgRate) * e.kwh)} บาท</b>
         </div>
@@ -1589,17 +1757,17 @@ function DetailSheet({ e, billKm, avgRate, onClose, onDelete, onSaveEdit, onTogg
       </div>
 
       {e.category === "company" && (
-        <button onClick={() => onToggleReimburse(e)} className="w-full mb-3 py-3.5 rounded-2xl font-semibold flex items-center justify-center gap-2" style={{ background: e.reimbursed ? "#E6F4EE" : C.accentSoft, color: e.reimbursed ? C.green : C.accent }}>
+        <button onClick={() => onToggleReimburse(e)} className="w-full mb-3 py-3.5 rounded-2xl font-semibold flex items-center justify-center gap-2" style={{ background: e.reimbursed ? "var(--green-soft)" : C.accentSoft, color: e.reimbursed ? C.green : C.accentText }}>
           {e.reimbursed ? <CheckCircle2 size={18} /> : <Circle size={18} />}
           {e.reimbursed ? "เบิกแล้ว (แตะเพื่อยกเลิก)" : "ทำเครื่องหมายว่าเบิกแล้ว"}
         </button>
       )}
 
       <div className="flex gap-2">
-        <button onClick={() => setEditing(true)} className="flex-1 py-3.5 rounded-2xl font-semibold flex items-center justify-center gap-2" style={{ background: C.accentSoft, color: C.accent }}>
+        <button onClick={() => setEditing(true)} className="flex-1 py-3.5 rounded-2xl font-semibold flex items-center justify-center gap-2" style={{ background: C.accentSoft, color: C.accentText }}>
           <Pencil size={16} /> แก้ไข
         </button>
-        <button onClick={async () => { setBusy(true); await onDelete(e.id); }} disabled={busy} className="flex-1 py-3.5 rounded-2xl font-semibold flex items-center justify-center gap-2" style={{ background: "#FDECEC", color: C.red }}>
+        <button onClick={async () => { setBusy(true); await onDelete(e.id); }} disabled={busy} className="flex-1 py-3.5 rounded-2xl font-semibold flex items-center justify-center gap-2" style={{ background: "var(--red-soft)", color: C.red }}>
           {busy ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />} ลบ
         </button>
       </div>
@@ -1617,7 +1785,7 @@ function Row({ k, v }) {
 }
 
 /* ---------------- shared ---------------- */
-const inputCls = "w-full px-4 py-3.5 rounded-2xl bg-white outline-none text-base";
+const inputCls = "w-full px-4 py-3.5 rounded-2xl bg-[var(--card)] outline-none text-base";
 
 function Field({ label, children }) {
   return (
@@ -1634,7 +1802,7 @@ function Sheet({ title, children, onClose }) {
       <div className="w-full max-w-md rounded-t-3xl max-h-[92vh] overflow-y-auto p-6 pb-10" style={{ background: C.bg }} onClick={(ev) => ev.stopPropagation()}>
         <div className="flex items-center justify-between mb-5 sticky top-0 pt-1 pb-3" style={{ background: C.bg }}>
           <h2 className="text-2xl font-bold">{title}</h2>
-          <button onClick={onClose} className="w-10 h-10 rounded-full flex items-center justify-center" style={{ background: "#DCE9EE" }}><X size={18} /></button>
+          <button onClick={onClose} className="w-10 h-10 rounded-full flex items-center justify-center" style={{ background: "var(--line)" }}><X size={18} /></button>
         </div>
         {children}
       </div>
@@ -1650,7 +1818,7 @@ function NavBar({ tab, setTab }) {
   ];
   return (
     <div className="fixed bottom-5 left-0 right-0 flex justify-center px-5">
-      <div className="flex gap-1 p-2 rounded-full shadow-lg" style={{ background: C.ink }}>
+      <div className="flex gap-1 p-2 rounded-full shadow-lg" style={{ background: C.strong }}>
         {items.map(({ k, label, icon: Icon }) => (
           <button key={k} onClick={() => setTab(k)} className="px-5 py-3 rounded-full flex items-center gap-2 text-sm font-medium transition" style={{ background: tab === k ? "rgba(255,255,255,.12)" : "transparent", color: tab === k ? "#fff" : "rgba(255,255,255,.55)" }}>
             <Icon size={18} />{label}

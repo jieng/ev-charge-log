@@ -1,9 +1,9 @@
 import React, { useState } from "react";
 import { Zap, Loader2, Mail, Lock, CheckCircle2 } from "lucide-react";
 import { signUpWithPassword, signInWithPassword } from "../lib/api";
+import { C } from "../lib/theme";
 
-const C = { accent: "#0E7490", accentSoft: "#DCEFF3", ink: "#164E63", bg: "#F4FAFB", muted: "#475569", line: "#CFE8EE" };
-const inputCls = "w-full px-4 py-3.5 rounded-2xl bg-white outline-none text-base";
+const inputCls = "w-full px-4 py-3.5 rounded-2xl bg-[var(--card)] outline-none text-base";
 
 export default function Login() {
   const [mode, setMode] = useState("signin"); // "signin" | "signup"
@@ -43,7 +43,7 @@ export default function Login() {
   return (
     <div className="min-h-screen flex items-center justify-center px-6" style={{ background: C.bg, color: C.ink }}>
       <div className="w-full max-w-sm">
-        <div className="w-14 h-14 rounded-2xl flex items-center justify-center mb-6 mx-auto" style={{ background: C.ink }}>
+        <div className="w-14 h-14 rounded-2xl flex items-center justify-center mb-6 mx-auto" style={{ background: C.strong }}>
           <Zap size={26} color="#fff" />
         </div>
         <h1 className="text-2xl font-bold text-center mb-1">บันทึกค่าไฟรถ EV</h1>
@@ -52,8 +52,8 @@ export default function Login() {
         </p>
 
         {signedUp ? (
-          <div className="rounded-3xl bg-white p-6 text-center shadow-sm" style={{ border: `1px solid ${C.line}` }}>
-            <CheckCircle2 size={36} color={C.accent} className="mx-auto mb-3" />
+          <div className="rounded-3xl bg-[var(--card)] p-6 text-center shadow-sm" style={{ border: `1px solid ${C.line}` }}>
+            <CheckCircle2 size={36} color={C.accentText} className="mx-auto mb-3" />
             <p className="font-semibold mb-1">สมัครสำเร็จ</p>
             <p className="text-sm mb-4" style={{ color: C.muted }}>
               เช็กอีเมล <b>{email}</b> แล้วกดลิงก์ยืนยันหนึ่งครั้ง (อาจอยู่ในถังขยะ/สแปม) จากนั้นกลับมาเข้าสู่ระบบด้วยอีเมล+รหัสผ่านนี้ได้เลย
@@ -61,15 +61,15 @@ export default function Login() {
             <button
               onClick={() => { setSignedUp(false); setMode("signin"); setPassword(""); }}
               className="text-sm font-semibold"
-              style={{ color: C.accent }}
+              style={{ color: C.accentText }}
             >
               ไปหน้าเข้าสู่ระบบ
             </button>
           </div>
         ) : (
-          <form onSubmit={submit} className="rounded-3xl bg-white p-6 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
+          <form onSubmit={submit} className="rounded-3xl bg-[var(--card)] p-6 shadow-sm" style={{ border: `1px solid ${C.line}` }}>
             <label className="block text-sm font-medium mb-2">อีเมล</label>
-            <div className="flex items-center gap-2 px-4 py-3.5 rounded-2xl mb-4" style={{ background: "#F7F6F4" }}>
+            <div className="flex items-center gap-2 px-4 py-3.5 rounded-2xl mb-4" style={{ background: "var(--bg)" }}>
               <Mail size={18} color={C.muted} />
               <input
                 type="email"
@@ -82,7 +82,7 @@ export default function Login() {
             </div>
 
             <label className="block text-sm font-medium mb-2">รหัสผ่าน</label>
-            <div className="flex items-center gap-2 px-4 py-3.5 rounded-2xl mb-4" style={{ background: "#F7F6F4" }}>
+            <div className="flex items-center gap-2 px-4 py-3.5 rounded-2xl mb-4" style={{ background: "var(--bg)" }}>
               <Lock size={18} color={C.muted} />
               <input
                 type="password"
@@ -95,7 +95,7 @@ export default function Login() {
               />
             </div>
 
-            {err && <p className="text-sm mb-3" style={{ color: "#B4634F" }}>{err}</p>}
+            {err && <p className="text-sm mb-3" style={{ color: C.red }}>{err}</p>}
 
             <button
               type="submit"
@@ -113,9 +113,9 @@ export default function Login() {
               style={{ color: C.muted }}
             >
               {mode === "signup" ? (
-                <>มีบัญชีอยู่แล้ว? <span style={{ color: C.accent, fontWeight: 600 }}>เข้าสู่ระบบ</span></>
+                <>มีบัญชีอยู่แล้ว? <span style={{ color: C.accentText, fontWeight: 600 }}>เข้าสู่ระบบ</span></>
               ) : (
-                <>ยังไม่มีบัญชี? <span style={{ color: C.accent, fontWeight: 600 }}>สมัครสมาชิก</span></>
+                <>ยังไม่มีบัญชี? <span style={{ color: C.accentText, fontWeight: 600 }}>สมัครสมาชิก</span></>
               )}
             </button>
           </form>
